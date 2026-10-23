@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.DS_Store
+# Личный журнал работы — остаётся только локально
+PROGRESS.md
+# Ключ Mapillary — только локально
+.mapillary-token*

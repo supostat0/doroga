@@ -1,0 +1,172 @@
+:root {
+  --fog: #1b1d33;
+  --ink: #ece8f4;
+  --paper: rgba(16, 17, 32, 0.72);
+  --warm: #ffb45a;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--fog);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+#game {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  image-rendering: pixelated; /* растягиваем низкое разрешение без размытия */
+}
+
+#intro {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-align: center;
+  background: linear-gradient(rgba(14, 15, 30, 0.35), rgba(14, 15, 30, 0.8));
+  backdrop-filter: blur(2px);
+  padding: 16px;
+}
+#intro h1 {
+  margin: 0;
+  font-size: clamp(48px, 9vw, 96px);
+  font-weight: 300;
+  letter-spacing: 0.06em;
+}
+#intro p { margin: 4px 0; }
+#intro .keys { margin-top: 16px; font-size: 14px; line-height: 1.8; opacity: 0.8; }
+#intro button {
+  margin-top: 24px;
+  font: inherit;
+  font-size: 18px;
+  padding: 12px 36px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--warm);
+  color: #1a1420;
+  cursor: pointer;
+}
+#intro button:disabled { opacity: 0.5; cursor: wait; }
+#intro.gone { opacity: 0; pointer-events: none; transition: opacity 0.8s; }
+
+#hud { position: fixed; inset: 0; pointer-events: none; }
+#hud .street {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--paper);
+  white-space: nowrap;
+}
+#hud .street:empty { display: none; }
+#hud .order {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 14px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(255, 180, 90, 0.18);
+  border: 1px solid rgba(255, 180, 90, 0.4);
+  white-space: nowrap;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#hud .order[hidden] { display: none; }
+#hud .speed {
+  position: absolute;
+  right: 20px;
+  bottom: 16px;
+  font-size: 44px;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 14px rgba(255, 180, 90, 0.55);
+}
+#hud .speed small { font-size: 14px; margin-left: 4px; }
+#hud .redlights {
+  position: absolute;
+  right: 20px;
+  bottom: 76px;
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(200, 40, 40, 0.85);
+  color: #fff;
+}
+#minimap {
+  position: absolute;
+  left: 16px;
+  bottom: 28px;
+  width: 180px;
+  height: 180px;
+  border-radius: 50%;
+  background: var(--paper);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+}
+#minimap.off { display: none; }
+
+.attribution {
+  position: fixed;
+  right: 8px;
+  top: 6px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+.attribution a { color: inherit; }
+
+@media (max-width: 600px) {
+  #minimap { width: 120px; height: 120px; }
+  #hud .order {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 14px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(255, 180, 90, 0.18);
+  border: 1px solid rgba(255, 180, 90, 0.4);
+  white-space: nowrap;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#hud .order[hidden] { display: none; }
+#hud .speed { font-size: 32px; }
+}
+
+.perf {
+  position: fixed;
+  left: 16px;
+  top: 16px;
+  width: 280px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--paper);
+  font-size: 13px;
+  line-height: 1.55;
+  z-index: 5;
+}
+.perf[hidden] { display: none; }
+.perf-title { font-weight: 600; margin-bottom: 6px; }
+.perf-bar { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.12); overflow: hidden; margin-bottom: 6px; }
+.perf-bar i { display: block; height: 100%; border-radius: 3px; background: #6fcf8f; transition: width 0.4s; }
+.perf[data-level='mid'] .perf-bar i { background: #f2c14e; }
+.perf[data-level='high'] .perf-bar i { background: #e5654b; }
+.perf-tech { opacity: 0.6; font-family: ui-monospace, monospace; font-size: 11px; margin-top: 4px; }
+.perf-hint { opacity: 0.5; font-size: 11px; margin-top: 4px; }

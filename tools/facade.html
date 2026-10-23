@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Фото → фасад</title>
+<style>
+  :root { color-scheme: dark; --bg: #14131a; --fg: #e8e6f0; --mute: #9a97a8; --acc: #ffb454; --line: #2a2833; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+  header { padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; border-bottom: 1px solid var(--line); }
+  label { color: var(--mute); }
+  input[type=number], input[type=text], select { background: #1f1d27; color: var(--fg); border: 1px solid #34313f; border-radius: 4px; padding: 3px 6px; }
+  input[type=number] { width: 64px; }
+  input[type=text] { width: 180px; }
+  button { background: var(--acc); color: #1a1408; border: 0; border-radius: 6px; padding: 6px 12px; font-weight: 600; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--fg); border: 1px solid #34313f; font-weight: 500; }
+  button.ghost.on { border-color: var(--acc); color: var(--acc); }
+  button:disabled { opacity: .4; cursor: default; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; padding: 16px; align-items: start; }
+  #right { display: grid; gap: 16px; min-width: 0; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .pane h2 { font-size: 13px; color: var(--mute); font-weight: 500; margin: 0 0 8px; }
+  #map { width: 100%; height: 75vh; display: block; background: #0d0c12; border-radius: 6px; cursor: pointer; touch-action: none; }
+  #src { max-width: 100%; cursor: crosshair; display: block; }
+  #disp, #out { max-width: 100%; image-rendering: pixelated; display: block; background: #000; }
+  #disp { cursor: crosshair; touch-action: none; }
+  #wall, #hint, #count { color: var(--mute); }
+  #wall b { color: var(--fg); font-weight: 600; }
+  #count { margin: 0 0 8px; font-size: 13px; }
+  #hint.warn { color: #ff7a6b; font-weight: 600; }
+  #hint.ok { color: #7be08a; font-weight: 600; }
+  input.warn { border-color: #ff7a6b; outline: 2px solid #ff7a6b55; }
+  .strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  #mlyHint { color: var(--mute); font-size: 13px; margin: 0 0 6px; }
+  .thumb span { position: absolute; left: 3px; bottom: 3px; padding: 0 4px; border-radius: 3px; background: #000b; color: #fff; font-size: 11px; }
+  .thumb { position: relative; width: 96px; height: 64px; border: 2px solid transparent; border-radius: 6px; overflow: hidden; cursor: pointer; }
+  .thumb.on { border-color: var(--acc); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb button { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; padding: 0; border-radius: 50%; background: #000a; color: #fff; font-size: 15px; line-height: 22px; }
+  .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .swatch { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -2px; border: 1px solid #fff4; }
+  #modeHint { color: var(--mute); font-size: 13px; margin: 0 0 8px; }
+</style>
+</head>
+<body>
+<header>
+  <input type="file" id="file" accept="image/*" multiple>
+  <label>Ширина, м <input type="number" id="w" value="40" step="0.1"></label>
+  <label title="На какой реальной высоте стоят точки 1–2. Окна вытянуты — уменьшите, сплющены — увеличьте.">Высота рамки, м <input type="number" id="h" value="22" step="0.5"></label>
+  <label>Автор фото <input type="text" id="credit" placeholder="Имя автора снимка"></label>
+  <select id="source">
+    <option value="Mapillary, CC BY-SA 4.0">Mapillary</option>
+    <option value="Wikimedia Commons, CC BY-SA 4.0">Wikimedia Commons</option>
+    <option value="своё фото">Своё фото</option>
+  </select>
+  <button id="send" disabled>Сохранить в игру</button>
+  <span id="hint">1) стена на карте · 2) фото и углы · 3) разметка: этажи, окно, низ</span>
+</header>
+<main>
+  <div class="pane"><h2 id="wall">Карта: колесо — масштаб, тянуть — двигать, клик по стене дома — выбрать. Оранжевые стены уже размечены.</h2><canvas id="map"></canvas></div>
+  <div id="right">
+    <div class="pane"><h2>1. Фото: углы фасада — 1 левый верх, 2 правый верх, 3 правый низ, 4 левый низ. Можно несколько снимков одного фасада.</h2><p id="mlyHint"></p><div id="mly" class="strip"></div><div id="thumbs" class="strip"></div><p id="count"></p><canvas id="src"></canvas></div>
+    <div class="pane">
+      <h2>2. Разметка на выпрямленном фото</h2>
+      <div class="tools">
+        <button class="ghost mode" data-mode="floors">Этажи</button>
+        <button class="ghost mode" data-mode="win">Окно</button>
+        <button class="ghost mode" data-mode="ground">Низ</button>
+        <label>проёмы внизу: <select id="gtype"><option value="arch">арки</option><option value="shop">витрины</option><option value="door">двери</option></select></label>
+        <button class="ghost mode" data-mode="split">Секции</button>
+        <button class="ghost mode" data-mode="top">Высота секции</button>
+        <button class="ghost mode" data-mode="wallc">Цвет стены <span class="swatch" id="sw"></span></button>
+        <button class="ghost mode" data-mode="trimc">Цвет отделки <span class="swatch" id="st"></span></button>
+        <label><input type="checkbox" id="crown" checked> сандрики</label>
+        <button class="ghost" id="resetWin">Сбросить окна</button>
+      </div>
+      <p id="modeHint"></p>
+      <canvas id="disp"></canvas>
+    </div>
+    <div class="pane"><h2>3. Результат — так дом будет выглядеть в игре (днём; ночью окна горят)</h2><canvas id="out"></canvas></div>
+  </div>
+</main>
+<script type="module">
+import { homography, kmeans, wallSpan, wallChain, combine, findRepeats, fillGrid, viewCamera, dirToPano } from './facade-math.mjs';
+import { project, unproject } from './geo.mjs';
+import { drawFacade, facadeSections, PX_PER_M as P } from '../src/facadegen.js';
+
+const $ = (id) => document.getElementById(id);
+const hex = (c) => '#' + c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+
+// ---------- Карта ----------
+const map = await (await fetch('/map.json')).json();
+let done = await fetch('/facades/index.json').then((r) => (r.ok ? r.json() : [])).catch(() => []);
+const mc = $('map'), mctx = mc.getContext('2d');
+const view = { cx: 40, cz: 0, s: 1.5 }; // центр в метрах, пикселей на метр; старт — у Казанского моста
+let sel = null, hover = null; // { bi, s, e } — дом и вершины концов стены
+let wallH = null; // высота стены из OSM (рамка на фото может стоять на другой высоте)
+
+function resize() {
+  const r = mc.getBoundingClientRect();
+  mc.width = r.width * devicePixelRatio; mc.height = r.height * devicePixelRatio;
+  drawMap();
+}
+const toScreen = (x, z) => [(x - view.cx) * view.s * devicePixelRatio + mc.width / 2, (z - view.cz) * view.s * devicePixelRatio + mc.height / 2];
+const toWorld = (sx, sy) => [(sx - mc.width / 2) / (view.s * devicePixelRatio) + view.cx, (sy - mc.height / 2) / (view.s * devicePixelRatio) + view.cz];
+
+function poly(ring) {
+  mctx.beginPath();
+  ring.forEach(([x, z], i) => { const [sx, sy] = toScreen(x, z); i ? mctx.lineTo(sx, sy) : mctx.moveTo(sx, sy); });
+  mctx.closePath();
+}
+function seg(a, b, color, width) {
+  const [ax, ay] = toScreen(...a), [bx, by] = toScreen(...b);
+  mctx.strokeStyle = color; mctx.lineWidth = width * devicePixelRatio;
+  mctx.beginPath(); mctx.moveTo(ax, ay); mctx.lineTo(bx, by); mctx.stroke();
+}
+
+function drawMap() {
+  mctx.fillStyle = '#0d0c12'; mctx.fillRect(0, 0, mc.width, mc.height);
+  mctx.fillStyle = '#1d2a3d';
+  for (const w of map.water) { poly(w.o); mctx.fill(); }
+  mctx.strokeStyle = '#3a3746'; mctx.lineCap = 'round';
+  for (const r of map.roads) {
+    mctx.lineWidth = Math.max(1, (r.w || 3) * view.s * devicePixelRatio * (r.kind === 'drive' ? 1 : 0.5));
+    mctx.beginPath();
+    r.p.forEach(([x, z], i) => { const [sx, sy] = toScreen(x, z); i ? mctx.lineTo(sx, sy) : mctx.moveTo(sx, sy); });
+    mctx.stroke();
+  }
+  mctx.lineWidth = devicePixelRatio;
+  for (const b of map.buildings) {
+    poly(b.o);
+    mctx.fillStyle = b.mh > 0 ? '#3b3648' : '#575166'; mctx.fill();
+    mctx.strokeStyle = '#8a8499'; mctx.stroke();
+  }
+  for (const f of done) if (f.params) seg(f.a, f.b, '#ffb454', 4);
+  if (hover && !same(hover, sel)) { const w = span(hover); seg(w.a, w.b, '#ffffff88', 4); }
+  if (sel) {
+    const w = span(sel);
+    seg(w.a, w.b, '#7cf0ff', 6);
+    // Точка «откуда смотреть»: снаружи стены.
+    const [sx, sy] = toScreen(w.mid[0] + w.n[0] * 8, w.mid[1] + w.n[1] * 8);
+    mctx.fillStyle = '#7cf0ff'; mctx.beginPath(); mctx.arc(sx, sy, 5 * devicePixelRatio, 0, 7); mctx.fill();
+  }
+}
+
+const span = (w) => wallSpan(map.buildings[w.bi].o, w.s, w.e);
+const same = (x, y) => x && y && x.bi === y.bi && x.s === y.s && x.e === y.e;
+
+// Ближайшая к курсору стена (в пределах 10 px) — целиком, от угла до угла.
+function pick(sx, sy) {
+  const [x, z] = toWorld(sx, sy);
+  let best = null, bd = 10 / view.s;
+  map.buildings.forEach((b, bi) => {
+    const ring = b.o;
+    for (let ei = 0; ei < ring.length; ei++) {
+      const a = ring[ei], c = ring[(ei + 1) % ring.length];
+      const dx = c[0] - a[0], dz = c[1] - a[1], L2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / L2));
+      const d = Math.hypot(x - a[0] - dx * t, z - a[1] - dz * t);
+      if (d < bd) { bd = d; best = { bi, ei }; }
+    }
+  });
+  return best && { bi: best.bi, ...wallChain(map.buildings[best.bi].o, best.ei) };
+}
+
+let panFrom = null, moved = false;
+const ev = (e) => { const r = mc.getBoundingClientRect(); return [(e.clientX - r.left) * devicePixelRatio, (e.clientY - r.top) * devicePixelRatio]; };
+mc.onpointerdown = (e) => { panFrom = { p: ev(e), cx: view.cx, cz: view.cz }; moved = false; mc.setPointerCapture(e.pointerId); };
+mc.onpointermove = (e) => {
+  const p = ev(e);
+  if (panFrom) {
+    const dx = p[0] - panFrom.p[0], dy = p[1] - panFrom.p[1];
+    if (Math.hypot(dx, dy) > 4 * devicePixelRatio) moved = true;
+    if (moved) { view.cx = panFrom.cx - dx / (view.s * devicePixelRatio); view.cz = panFrom.cz - dy / (view.s * devicePixelRatio); drawMap(); }
+    return;
+  }
+  const h = pick(...p);
+  if (!same(h, hover)) { hover = h; drawMap(); }
+};
+mc.onpointerup = (e) => {
+  if (panFrom && !moved) { const s = pick(...ev(e)); if (s) selectWall(s); }
+  panFrom = null;
+};
+mc.onwheel = (e) => {
+  e.preventDefault();
+  const p = ev(e), before = toWorld(...p);
+  view.s = Math.min(20, Math.max(0.3, view.s * Math.exp(-e.deltaY * 0.0015)));
+  const after = toWorld(...p);
+  view.cx += before[0] - after[0]; view.cz += before[1] - after[1];
+  drawMap();
+};
+addEventListener('resize', () => { resize(); redraw(); });
+
+function selectWall(s) {
+  sel = s;
+  const b = map.buildings[s.bi], w = span(s);
+  wallH = b.h - (b.mh || 0);
+  $('w').value = w.len.toFixed(1);
+  $('h').value = wallH.toFixed(1);
+  $('wall').innerHTML = `<b>${b.name || 'Дом без названия'}</b> · стена ${w.len.toFixed(1)} × ${wallH.toFixed(1)} м (≈ ${Math.round(w.len / 3)} окон) · точка — откуда смотреть`;
+  // Уже размеченная стена — подтянуть её параметры.
+  const old = done.find((f) => f.params && Math.hypot(f.mid[0] - w.mid[0], f.mid[1] - w.mid[1]) < 0.5);
+  if (old) { params = structuredClone(old.params); userColors = true; }
+  drawMap(); rectify(); findShots();
+}
+
+// ---------- Фото ----------
+const src = $('src'), sctx = src.getContext('2d');
+let photos = [], cur = -1, drag = -1;
+
+const loadImg = (url) => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+const pixelsOf = (im) => {
+  const c = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  c.canvas.width = im.width; c.canvas.height = im.height;
+  c.drawImage(im, 0, 0);
+  return c.getImageData(0, 0, im.width, im.height).data;
+};
+
+// pts — углы рамки; без них — как у предыдущего снимка того же размера или с отступом от краёв.
+function addPhoto(im, name, pts) {
+  const m = 0.1, prev = photos[cur];
+  pts ||= prev && prev.img.width === im.width && prev.img.height === im.height
+    ? prev.pts.map((q) => [...q])
+    : [[m, m], [1 - m, m], [1 - m, 1 - m], [m, 1 - m]].map(([u, v]) => [u * im.width, v * im.height]);
+  photos.push({ name, img: im, data: pixelsOf(im), pts });
+  select(photos.length - 1);
+}
+
+async function load(file) {
+  addPhoto(await loadImg(URL.createObjectURL(file)), file.name.replace(/\.[^.]+$/, '') || 'facade');
+}
+
+// ---------- Снимки Mapillary перед выбранной стеной ----------
+const CAM_H = 2.5; // высота камеры над землёй (на крыше машины / в руке), м
+let shotsFor = null;
+
+async function findShots() {
+  const w = span(sel), key = `${sel.bi}:${sel.s}:${sel.e}`;
+  shotsFor = key;
+  const pad = 45, xs = [w.a[0], w.b[0]], zs = [w.a[1], w.b[1]];
+  const [la0, lo0] = unproject(Math.min(...xs) - pad, Math.max(...zs) + pad);
+  const [la1, lo1] = unproject(Math.max(...xs) + pad, Math.min(...zs) - pad);
+  $('mly').innerHTML = ''; $('mlyHint').textContent = 'Ищу снимки Mapillary перед этой стеной…';
+  const list = await fetch(`/__mly/near?bbox=${lo0},${la0},${lo1},${la1}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (shotsFor !== key) return; // пока искали, выбрали другую стену
+  if (!list) { $('mlyHint').textContent = 'Mapillary недоступен (нужен дев-сервер и ключ в .mapillary-token).'; return; }
+  const t = [(w.b[0] - w.a[0]) / w.len, (w.b[1] - w.a[1]) / w.len];
+  const shots = list.map((m) => {
+    const g = (m.computed_geometry || m.geometry).coordinates;
+    const C = project(g[1], g[0]);
+    const rx = C[0] - w.mid[0], rz = C[1] - w.mid[1];
+    const heading = m.computed_compass_angle ?? m.compass_angle;
+    const bearing = (Math.atan2(-rx, rz) * 180) / Math.PI; // от камеры к середине стены
+    const off = ((bearing - heading + 540) % 360) - 180;
+    return { ...m, C, heading, off, d: rx * w.n[0] + rz * w.n[1], along: rx * t[0] + rz * t[1] };
+  }).filter((m) => m.d > 3 && m.d < 45 && Math.abs(m.along) < w.len / 2 + 25 && (m.is_pano || Math.abs(m.off) < 50))
+    .sort((p, q) => q.is_pano - p.is_pano || q.captured_at - p.captured_at)
+    .slice(0, 16);
+  $('mlyHint').textContent = shots.length
+    ? `Снимки Mapillary перед стеной (${shots.length}): клик — добавить. У панорам (360°) углы ставятся сами.`
+    : 'Перед этой стеной снимков Mapillary нет — загрузите фото вручную.';
+  for (const m of shots) {
+    const el = document.createElement('div');
+    el.className = 'thumb';
+    el.title = `${m.creator?.username || 'автор неизвестен'}, ${new Date(m.captured_at).toLocaleDateString('ru')}`;
+    el.innerHTML = `<img src="/__mly/img?id=${m.id}&size=256" loading="lazy"><span>${new Date(m.captured_at).getFullYear()}${m.is_pano ? ' · 360°' : ''}</span>`;
+    el.onclick = () => addShot(m, el);
+    $('mly').append(el);
+  }
+}
+
+async function addShot(m, el) {
+  el.style.opacity = 0.4;
+  const im = await loadImg(`/__mly/img?id=${m.id}&size=2048`);
+  if (m.is_pano) {
+    const { image, pts } = await panoView(im, m);
+    addPhoto(image, `mapillary_${m.id}`, pts);
+  } else addPhoto(im, `mapillary_${m.id}`);
+  if (m.creator?.username) $('credit').value = m.creator.username;
+  $('source').value = 'Mapillary, CC BY-SA 4.0';
+  el.style.opacity = 1;
+}
+
+// Из панорамы — обычный кадр в сторону стены; углы стены проецируются по положению камеры.
+async function panoView(im, m) {
+  const b = map.buildings[sel.bi], w = span(sel), base = b.mh || 0;
+  const rel = (p, y) => [p[0] - m.C[0], y - CAM_H, -(p[1] - m.C[1])]; // [восток, вверх, север]
+  const corners = [rel(w.a, base + wallH), rel(w.b, base + wallH), rel(w.b, base), rel(w.a, base)];
+  const mid = rel(w.mid, base + wallH / 2);
+  const yaw = (Math.atan2(mid[0], mid[2]) * 180) / Math.PI;
+  const pitch = (Math.atan2(mid[1], Math.hypot(mid[0], mid[2])) * 180) / Math.PI;
+  const W = 1600, H = 1000;
+  let cam, pts;
+  for (let fov = 60; fov <= 140; fov += 5) {
+    cam = viewCamera({ yaw, pitch, fov, W, H });
+    pts = corners.map(cam.project);
+    if (pts.every((p) => p && p[0] > 20 && p[0] < W - 20 && p[1] > 20 && p[1] < H - 20)) break;
+  }
+  const src = pixelsOf(im), pw = im.width, ph = im.height;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d'), out = ctx.createImageData(W, H);
+  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+    const [u, v] = dirToPano(cam.ray(i + 0.5, j + 0.5), m.heading);
+    const k = (Math.min(ph - 1, (v * ph) | 0) * pw + (((u * pw) | 0) % pw)) * 4, o = (j * W + i) * 4;
+    out.data[o] = src[k]; out.data[o + 1] = src[k + 1]; out.data[o + 2] = src[k + 2]; out.data[o + 3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+  const image = await loadImg(c.toDataURL('image/jpeg', 0.92));
+  return { image, pts: pts.every(Boolean) ? pts : null };
+}
+$('file').onchange = (e) => { [...e.target.files].forEach(load); e.target.value = ''; };
+addEventListener('paste', (e) => [...e.clipboardData.files].forEach(load));
+
+function select(i) {
+  cur = i;
+  const p = photos[cur];
+  if (p) { src.width = p.img.width; src.height = p.img.height; drawSrc(); } else { src.width = src.height = 0; }
+  thumbs(); rectify();
+}
+
+function thumbs() {
+  const box = $('thumbs');
+  box.innerHTML = '';
+  photos.forEach((p, i) => {
+    const t = document.createElement('div');
+    t.className = 'thumb' + (i === cur ? ' on' : '');
+    t.title = p.name;
+    t.append(p.img.cloneNode());
+    t.onclick = () => select(i);
+    const x = document.createElement('button');
+    x.textContent = '×'; x.title = 'Убрать снимок';
+    x.onclick = (e) => { e.stopPropagation(); photos.splice(i, 1); select(Math.min(cur, photos.length - 1)); };
+    t.append(x);
+    box.append(t);
+  });
+  $('count').textContent = photos.length > 2 ? `${photos.length} снимка: прохожие и машины, которых нет на всех кадрах, убираются.`
+    : photos.length ? 'Ещё снимки того же фасада (3+) уберут прохожих и машины — разметку будет проще ставить.' : '';
+}
+
+function drawSrc() {
+  const { img, pts } = photos[cur];
+  sctx.drawImage(img, 0, 0);
+  const r = Math.max(6, img.width / 150);
+  sctx.lineWidth = r / 3; sctx.strokeStyle = '#ffb454';
+  sctx.beginPath(); pts.forEach(([x, y], i) => (i ? sctx.lineTo(x, y) : sctx.moveTo(x, y))); sctx.closePath(); sctx.stroke();
+  pts.forEach(([x, y], i) => {
+    sctx.fillStyle = '#ffb454'; sctx.beginPath(); sctx.arc(x, y, r, 0, 7); sctx.fill();
+    sctx.fillStyle = '#1a1408'; sctx.font = `${r * 1.4}px sans-serif`; sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
+    sctx.fillText(i + 1, x, y);
+  });
+}
+
+const toImg = (e) => { const b = src.getBoundingClientRect(); return [(e.clientX - b.left) * src.width / b.width, (e.clientY - b.top) * src.height / b.height]; };
+src.onpointerdown = (e) => {
+  if (cur < 0) return;
+  const p = toImg(e), pts = photos[cur].pts;
+  drag = pts.reduce((best, q, i) => (Math.hypot(q[0] - p[0], q[1] - p[1]) < Math.hypot(pts[best][0] - p[0], pts[best][1] - p[1]) ? i : best), 0);
+  src.setPointerCapture(e.pointerId);
+  pts[drag] = p; drawSrc();
+};
+src.onpointermove = (e) => { if (drag >= 0) { photos[cur].pts[drag] = toImg(e); drawSrc(); } };
+src.onpointerup = () => { if (drag >= 0) { drag = -1; rectify(); } };
+['w', 'h'].forEach((id) => ($(id).onchange = rectify));
+
+// ---------- Выпрямленное фото (P пикселей на метр) ----------
+let R = null; // { W, H, L, h, rgb: [[r,g,b]...], gray: [...] }
+// rowV(строка) → v рамки (0 — линия 1–2, 1 — линия 4–3; выше рамки v < 0, перспектива продлевается).
+function rectifyOne({ img, data, pts }, W, H, rowV) {
+  const T = homography(pts), N = 3, cols = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let r = 0, g = 0, b = 0;
+    for (let sy = 0; sy < N; sy++) for (let sx = 0; sx < N; sx++) {
+      const [ix, iy] = T((x + (sx + 0.5) / N) / W, rowV(y + (sy + 0.5) / N));
+      const i = (Math.min(img.height - 1, Math.max(0, iy | 0)) * img.width + Math.min(img.width - 1, Math.max(0, ix | 0))) * 4;
+      r += data[i]; g += data[i + 1]; b += data[i + 2];
+    }
+    cols.push([r / N / N, g / N / N, b / N / N]);
+  }
+  return cols;
+}
+
+function rectify() {
+  if (!photos.length) { R = null; redraw(); return; }
+  const L = +$('w').value, hq = +$('h').value, h = wallH ?? hq;
+  // Запас 30% сверху — чтобы отметить секции выше дома из OSM.
+  const top = Math.max(h, hq) * 1.3;
+  const W = Math.max(1, Math.round(L * P)), H = Math.max(1, Math.round(top * P));
+  const rowV = (row) => (hq - (top - row / P)) / hq;
+  const layers = photos.map((p) => rectifyOne(p, W, H, rowV));
+  const rgb = layers[0].map((_, i) => combine(layers.map((l) => l[i])));
+  R = { W, H, L, h, top, rgb, gray: rgb.map((c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) };
+  if (!userColors) autoColors();
+  redraw();
+}
+
+// Цвета по умолчанию: стена — самый частый цвет, отделка — самый светлый из заметных.
+function autoColors() {
+  const skip = Math.round((R.top - Math.min(R.h, +$('h').value)) * P) * R.W; // небо над рамкой не считаем
+  const sample = R.rgb.filter((_, i) => i >= skip && i % 3 === 0);
+  const pal = kmeans(sample, 5);
+  const cnt = pal.map(() => 0);
+  for (const c of sample) {
+    let bi = 0, bd = Infinity;
+    pal.forEach((p, i) => { const d = (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2 + (p[2] - c[2]) ** 2; if (d < bd) { bd = d; bi = i; } });
+    cnt[bi]++;
+  }
+  const wallI = cnt.indexOf(Math.max(...cnt));
+  const light = pal.map((c, i) => [c[0] + c[1] + c[2], i]).sort((a, b) => b[0] - a[0]).find(([, i]) => i !== wallI && cnt[i] > sample.length * 0.03);
+  params.wall = hex(pal[wallI]);
+  params.trim = light ? hex(pal[light[1]]) : '#e8e6e0';
+}
+
+// ---------- Разметка ----------
+let params = { floors: [], win: null, cols: [], floorWin: {}, ground: null, wall: '#8a9aa8', trim: '#e8e6e0' };
+let userColors = false, mode = 'floors', box = null;
+const disp = $('disp'), dctx = disp.getContext('2d');
+const out = $('out'), octx = out.getContext('2d');
+let S = 3; // увеличение превью
+
+const HINTS = {
+  floors: 'Кликайте по линиям между этажами снизу вверх: верх первого этажа, каждый следующий этаж, низ карниза. Клик рядом с линией — убрать.',
+  win: 'Обведите одно окно (тянуть мышью) — остальные в ряду найдутся сами. Если на другом этаже окна выше или ниже — обведите и там одно. Клик по окну — убрать столбец, по пустому месту — добавить.',
+  ground: 'Выберите, что внизу (арки, витрины или двери), и обведите один проём первого этажа — остальные найдутся сами. Клик — убрать/добавить.',
+  split: 'Если фасад из корпусов разной высоты — кликните по границе между ними (вертикальная линия). Клик рядом с линией — убрать.',
+  top: 'Кликните внутри секции на уровне верха её карниза — секция станет такой высоты. Выше дома — над крышей появится объём, ниже — заснеженная крыша.',
+  wallc: 'Кликните по стене — возьмётся её цвет.',
+  trimc: 'Кликните по наличнику или карнизу — возьмётся цвет отделки.',
+};
+function setMode(m) {
+  mode = m;
+  document.querySelectorAll('.mode').forEach((b) => b.classList.toggle('on', b.dataset.mode === m));
+  $('modeHint').textContent = HINTS[m];
+}
+document.querySelectorAll('.mode').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
+$('crown').onchange = () => { if (params.win) params.win.crown = $('crown').checked; redraw(); };
+$('gtype').onchange = () => { if (params.ground) params.ground.type = $('gtype').value; redraw(); };
+$('resetWin').onclick = () => { params.win = null; params.cols = []; params.floorWin = {}; setMode('win'); redraw(); };
+setMode('floors');
+
+// Экран превью → метры стены (u — от левого края, y — от низа).
+const toWall = (e) => {
+  const b = disp.getBoundingClientRect();
+  const x = (e.clientX - b.left) * disp.width / b.width / S, y = (e.clientY - b.top) * disp.height / b.height / S;
+  return [x / P, R.top - y / P];
+};
+// Номер этажа (индекс линии пола в floors), над которым точка; -1 — ниже первой линии.
+const floorIndex = (y) => params.floors.reduce((k, f, i) => (f <= y + 0.05 ? i : k), -1);
+
+disp.onpointerdown = (e) => {
+  if (!R) return;
+  const [u, y] = toWall(e);
+  if (mode === 'floors') {
+    const i = params.floors.findIndex((f) => Math.abs(f - y) < 0.35);
+    if (i >= 0) params.floors.splice(i, 1); else params.floors.push(+y.toFixed(2));
+    params.floors.sort((a, b) => a - b);
+    redraw(); return;
+  }
+  if (mode === 'split') {
+    // Новые границы: высоты сохраняются по серединам новых секций.
+    const old = facadeSections(params, R.L, R.h);
+    const dv = params.dividers || [];
+    const i = dv.findIndex((d) => Math.abs(d - u) < 0.4);
+    params.dividers = i >= 0 ? dv.filter((_, k) => k !== i) : [...dv, +u.toFixed(2)].sort((a, b) => a - b);
+    const tops = {};
+    facadeSections(params, R.L, R.h).forEach((q, k) => {
+      const o = old.find((s) => (q.u0 + q.u1) / 2 >= s.u0 && (q.u0 + q.u1) / 2 < s.u1);
+      if (o?.own) tops[k] = o.top;
+    });
+    params.tops = tops;
+    redraw(); return;
+  }
+  if (mode === 'top') {
+    const k = facadeSections(params, R.L, R.h).findIndex((q) => u >= q.u0 && u < q.u1);
+    params.tops = { ...(params.tops || {}), [k]: +Math.max(3, y).toFixed(2) };
+    redraw(); return;
+  }
+  if (mode === 'wallc' || mode === 'trimc') {
+    const x = Math.round(u * P), yy = Math.round((R.top - y) * P);
+    const c = [0, 0, 0]; let n = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const p = R.rgb[Math.min(R.H - 1, Math.max(0, yy + dy)) * R.W + Math.min(R.W - 1, Math.max(0, x + dx))];
+      c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; n++;
+    }
+    params[mode === 'wallc' ? 'wall' : 'trim'] = hex(c.map((v) => v / n));
+    userColors = true; redraw(); return;
+  }
+  box = { u0: u, y0: y, u1: u, y1: y };
+  disp.setPointerCapture(e.pointerId);
+};
+disp.onpointermove = (e) => { if (box) { [box.u1, box.y1] = toWall(e); redraw(); } };
+disp.onpointerup = () => {
+  if (!box) return;
+  const b = { u0: Math.min(box.u0, box.u1), u1: Math.max(box.u0, box.u1), y0: Math.min(box.y0, box.y1), y1: Math.max(box.y0, box.y1) };
+  box = null;
+  const isGround = mode === 'ground';
+  const tgt = isGround ? params.ground : params.win;
+  const list = isGround ? params.ground?.cols : params.cols;
+  if (b.u1 - b.u0 < 0.3 || b.y1 - b.y0 < 0.3) {
+    // Клик: убрать ближайший проём или добавить новый в этой точке.
+    if (tgt && list) {
+      const i = list.findIndex((c) => Math.abs(c - b.u0) < tgt.w / 2);
+      if (i >= 0) list.splice(i, 1); else { list.push(+b.u0.toFixed(2)); list.sort((a, c) => a - c); }
+    }
+    redraw(); return;
+  }
+  // Обводка: размеры образца + поиск таких же в этом ряду.
+  const pad = 2;
+  const x0 = Math.max(0, Math.round(b.u0 * P) - pad), x1 = Math.min(R.W, Math.round(b.u1 * P) + pad);
+  const t = Math.max(0, Math.round((R.top - b.y1) * P) - pad), bt = Math.min(R.H, Math.round((R.top - b.y0) * P) + pad);
+  const found = findRepeats(R.gray, R.W, x0, t, x1 - x0, bt - t).map((x) => +(x / P).toFixed(2));
+  const w = +(b.u1 - b.u0).toFixed(2), center = (b.u0 + b.u1) / 2;
+  if (!found.some((c) => Math.abs(c - center) < w / 2)) found.push(+center.toFixed(2));
+  const cols = fillGrid(found.sort((a, c) => a - c), w, R.L);
+  if (isGround) {
+    params.ground = { type: $('gtype').value, w, h: +b.y1.toFixed(2), cols };
+  } else {
+    const fi = floorIndex(b.y0);
+    const fw = { w, h: +(b.y1 - b.y0).toFixed(2), dy: +(b.y0 - (fi >= 0 ? params.floors[fi] : 0)).toFixed(2) };
+    if (!params.win) {
+      // Первое окно — образец для всех этажей и столбцы.
+      params.win = { ...fw, crown: $('crown').checked };
+      params.cols = cols;
+      params.floorWin = {};
+    } else {
+      // Следующие — своё окно этого этажа; столбцы не трогаем.
+      params.floorWin = { ...(params.floorWin || {}), [fi]: fw };
+    }
+  }
+  redraw();
+};
+
+function redraw() {
+  $('sw').style.background = params.wall; $('st').style.background = params.trim;
+  if (!R) { disp.width = disp.height = out.width = out.height = 0; $('send').disabled = true; return; }
+  // Увеличение: чтобы превью занимало ширину панели.
+  const avail = disp.parentElement.clientWidth || 600;
+  S = Math.max(1, Math.floor(avail / R.W));
+  disp.width = R.W * S; disp.height = R.H * S;
+  const img = dctx.createImageData(R.W, R.H);
+  R.rgb.forEach((c, i) => img.data.set([c[0], c[1], c[2], 255], i * 4));
+  const tmp = document.createElement('canvas'); tmp.width = R.W; tmp.height = R.H;
+  tmp.getContext('2d').putImageData(img, 0, 0);
+  dctx.imageSmoothingEnabled = false;
+  dctx.drawImage(tmp, 0, 0, disp.width, disp.height);
+  // Разметка поверх фото.
+  const X = (u) => u * P * S, Y = (y) => (R.top - y) * P * S;
+  dctx.lineWidth = 2;
+  dctx.font = '12px system-ui'; dctx.fillStyle = '#7cf0ff'; dctx.strokeStyle = '#7cf0ff';
+  params.floors.forEach((f, i) => {
+    dctx.beginPath(); dctx.moveTo(0, Y(f)); dctx.lineTo(disp.width, Y(f)); dctx.stroke();
+    dctx.fillText(i === 0 ? 'верх 1 этажа' : i === params.floors.length - 1 ? 'карниз' : `этаж ${i + 1}`, 4, Y(f) - 4);
+  });
+  if (params.win) {
+    dctx.strokeStyle = '#ffd34d';
+    const fl = params.floors.length > 1 ? params.floors.slice(0, -1) : [0];
+    fl.forEach((f, i) => {
+      const w = { ...params.win, ...(params.floorWin?.[i] || {}) };
+      for (const u of params.cols) dctx.strokeRect(X(u - w.w / 2), Y(f + w.dy + w.h), w.w * P * S, w.h * P * S);
+    });
+  }
+  if (params.ground) {
+    dctx.strokeStyle = '#7be08a';
+    const g = params.ground;
+    for (const u of g.cols) dctx.strokeRect(X(u - g.w / 2), Y(g.h), g.w * P * S, g.h * P * S);
+  }
+  // Секции: границы и верх карниза.
+  dctx.strokeStyle = '#ff8fd8'; dctx.fillStyle = '#ff8fd8';
+  for (const d of params.dividers || []) { dctx.beginPath(); dctx.moveTo(X(d), 0); dctx.lineTo(X(d), disp.height); dctx.stroke(); }
+  for (const q of facadeSections(params, R.L, R.h)) if (q.own) {
+    dctx.beginPath(); dctx.moveTo(X(q.u0), Y(q.top)); dctx.lineTo(X(q.u1), Y(q.top)); dctx.stroke();
+    dctx.fillText(`${q.top.toFixed(1)} м`, X(q.u0) + 4, Y(q.top) - 4);
+  }
+  if (box) { dctx.strokeStyle = '#fff'; dctx.strokeRect(X(Math.min(box.u0, box.u1)), Y(Math.max(box.y0, box.y1)), Math.abs(box.u1 - box.u0) * P * S, Math.abs(box.y1 - box.y0) * P * S); }
+  // Результат генератора — тем же масштабом (секции выше дома — выше и картинка).
+  const gen = drawFacade(params, R.L, R.h);
+  out.style.background = '#0d0c12';
+  out.width = gen.W * S; out.height = gen.H * S;
+  octx.imageSmoothingEnabled = false;
+  octx.drawImage(gen.albedo, 0, 0, out.width, out.height);
+  $('send').disabled = !sel;
+  const miss = [params.floors.length < 2 && 'этажи', !params.win && 'окно', !params.ground && 'низ'].filter(Boolean);
+  $('hint').classList.toggle('warn', !sel);
+  $('hint').textContent = !sel ? '⚠ Сначала кликните стену на карте — от неё зависят ширина и масштаб.'
+    : miss.length ? `Осталось отметить: ${miss.join(', ')}.` : 'Разметка готова — можно сохранять.';
+}
+
+// ---------- Сохранение ----------
+$('send').onclick = async () => {
+  if (!sel || !R) return;
+  if (!$('credit').value.trim()) {
+    $('hint').textContent = '⚠ Укажите автора фото — без этого в игру не кладём.';
+    $('hint').classList.add('warn'); $('credit').classList.add('warn'); $('credit').focus();
+    return;
+  }
+  $('credit').classList.remove('warn');
+  const b = map.buildings[sel.bi], w = span(sel);
+  const round = (p) => p.map((v) => Math.round(v * 100) / 100);
+  const meta = {
+    a: round(w.a), b: round(w.b), mid: round(w.mid),
+    base: b.mh || 0, h: R.h, L: R.L,
+    name: b.name || null, credit: `${$('credit').value.trim()}, ${$('source').value}`, photos: photos.map((p) => p.name),
+    params,
+  };
+  const r = await fetch('/__facade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ meta }) });
+  if (!r.ok) { $('hint').classList.add('warn'); $('hint').textContent = 'Не сохранилось: инструмент работает только на дев-сервере (npm run dev).'; return; }
+  const res = await r.json();
+  done = done.filter((f) => f.file !== res.file).concat({ ...meta, file: res.file });
+  $('hint').classList.add('ok');
+  $('hint').textContent = `✓ Сохранено в игру. Размечено стен: ${res.total}. Стена на карте стала оранжевой.`;
+  drawMap();
+};
+
+// Источник фото запоминается между заходами.
+try { const v = localStorage.getItem('facadeSource'); if (v) $('source').value = v; } catch {}
+$('source').onchange = () => { try { localStorage.setItem('facadeSource', $('source').value); } catch {} };
+
+resize();
+redraw();
+</script>
+</body>
+</html>

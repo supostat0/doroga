@@ -1,0 +1,21 @@
+{
+  "name": "doroga",
+  "version": "0.1.0",
+  "description": "Неспешная езда по заснеженному центру Петербурга в браузере. Карта — OpenStreetMap.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "map": "node tools/build-map.mjs",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "vite": "^6.4.5"
+  }
+}

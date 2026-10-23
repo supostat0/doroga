@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Дорога — Невский</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <div id="hud" hidden>
+    <div class="street" id="street"></div>
+    <div class="order" id="order" hidden></div>
+    <div class="speed"><span id="speed">0</span><small>км/ч</small></div>
+    <div class="redlights" id="redlights" hidden></div>
+    <canvas id="minimap" class="off" width="180" height="180"></canvas>
+  </div>
+
+  <div id="intro">
+    <h1>Дорога</h1>
+    <p>Невский проспект, зимняя ночь.</p>
+    <p class="keys">
+      <b>W A S D</b> / стрелки — ехать &nbsp;·&nbsp; <b>Пробел</b> — ручник &nbsp;·&nbsp; <b>Q E</b> — поворотники &nbsp;·&nbsp; <b>H</b> — клаксон<br />
+      <b>Мышь</b> — осмотреться &nbsp;·&nbsp; <b>V</b> — назад &nbsp;·&nbsp; <b>C</b> — камера &nbsp;·&nbsp; <b>R</b> — на дорогу &nbsp;·&nbsp; <b>M</b> — карта &nbsp;·&nbsp; <b>P</b> — нагрузка &nbsp;·&nbsp; <b>O</b> — заказы
+    </p>
+    <button id="start" disabled>Загрузка…</button>
+  </div>
+
+  <div class="attribution">Карта: © участники <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a></div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
