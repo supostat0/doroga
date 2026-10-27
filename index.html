@@ -18,17 +18,30 @@
     <canvas id="minimap" class="off" width="180" height="180"></canvas>
   </div>
 
+  <!-- Кнопки для телефона: видны только на сенсорных экранах (см. style.css) -->
+  <div id="touch" hidden>
+    <button data-key="left" aria-label="Влево">◀</button>
+    <button data-key="right" aria-label="Вправо">▶</button>
+    <button data-key="up" aria-label="Газ">▲</button>
+    <button data-key="down" aria-label="Тормоз, назад">▼</button>
+    <button data-act="reset" aria-label="Вернуться на дорогу">↺</button>
+    <button data-act="walk" aria-label="Выйти из машины / сесть">🚶</button>
+    <button data-act="fly" aria-label="Свободный полёт">✈</button>
+  </div>
+
   <div id="intro">
     <h1>Дорога</h1>
     <p>Невский проспект, зимняя ночь.</p>
-    <p class="keys">
+    <p class="keys touch-hint">◀ ▶ — руль, ▲ — газ, ▼ — тормоз и назад, ↺ — на дорогу.<br />Пальцем по экрану — осмотреться.</p>
+    <p class="keys desk-hint">
       <b>W A S D</b> / стрелки — ехать &nbsp;·&nbsp; <b>Пробел</b> — ручник &nbsp;·&nbsp; <b>Q E</b> — поворотники &nbsp;·&nbsp; <b>H</b> — клаксон<br />
-      <b>Мышь</b> — осмотреться &nbsp;·&nbsp; <b>V</b> — назад &nbsp;·&nbsp; <b>C</b> — камера &nbsp;·&nbsp; <b>R</b> — на дорогу &nbsp;·&nbsp; <b>M</b> — карта &nbsp;·&nbsp; <b>P</b> — нагрузка &nbsp;·&nbsp; <b>O</b> — заказы
+      <b>Мышь</b> — осмотреться &nbsp;·&nbsp; <b>V</b> — назад &nbsp;·&nbsp; <b>C</b> — камера &nbsp;·&nbsp; <b>R</b> — на дорогу &nbsp;·&nbsp; <b>M</b> — карта &nbsp;·&nbsp; <b>P</b> — нагрузка &nbsp;·&nbsp; <b>O</b> — заказы &nbsp;·&nbsp; <b>F</b> — выйти из машины / сесть (пешком: W/S, A/D, Shift — бегом) &nbsp;·&nbsp; <b>G</b> — полёт (WASD, E/Q, Shift)
     </p>
     <button id="start" disabled>Загрузка…</button>
   </div>
 
-  <div class="attribution">Карта: © участники <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a></div>
+  <div id="toast" hidden></div>
+  <div class="attribution">Карта: © участники <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a><div id="credit"></div></div>
 
   <script type="module" src="/src/main.js"></script>
 </body>

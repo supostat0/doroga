@@ -120,6 +120,54 @@ html, body {
 }
 #minimap.off { display: none; }
 
+/* Кнопки для телефона */
+#touch { display: none; }
+.touch-hint { display: none; }
+@media (pointer: coarse) {
+  #game { touch-action: none; }
+  #touch:not([hidden]) { display: block; }
+  .touch-hint { display: block; }
+  .desk-hint { display: none; }
+  #touch button {
+    position: fixed;
+    width: 76px;
+    height: 76px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 50%;
+    background: var(--paper);
+    color: var(--ink);
+    font-size: 26px;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #touch button.on { background: rgba(255, 180, 90, 0.45); }
+  #touch [data-key='left'] { left: 16px; bottom: calc(24px + env(safe-area-inset-bottom)); }
+  #touch [data-key='right'] { left: 104px; bottom: calc(24px + env(safe-area-inset-bottom)); }
+  #touch [data-key='up'] { right: 16px; bottom: calc(112px + env(safe-area-inset-bottom)); }
+  #touch [data-key='down'] { right: 16px; bottom: calc(24px + env(safe-area-inset-bottom)); }
+  #touch [data-act='reset'] { left: 16px; top: 16px; width: 44px; height: 44px; font-size: 20px; }
+  #touch [data-act='walk'] { left: 68px; top: 16px; width: 44px; height: 44px; font-size: 20px; }
+  #touch [data-act='fly'] { left: 120px; top: 16px; width: 44px; height: 44px; font-size: 20px; }
+  #hud .speed { bottom: calc(196px + env(safe-area-inset-bottom)); }
+  #hud .redlights { bottom: calc(250px + env(safe-area-inset-bottom)); }
+  #minimap { bottom: calc(112px + env(safe-area-inset-bottom)); }
+}
+
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 120px;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: var(--paper);
+  font-size: 14px;
+}
+#toast[hidden] { display: none; }
+
 .attribution {
   position: fixed;
   right: 8px;
@@ -128,6 +176,7 @@ html, body {
   opacity: 0.7;
 }
 .attribution a { color: inherit; }
+.attribution #credit { text-align: right; }
 
 @media (max-width: 600px) {
   #minimap { width: 120px; height: 120px; }

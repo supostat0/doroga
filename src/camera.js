@@ -2,6 +2,7 @@
 // Осмотр: тянуть мышью (или пальцем) — облёт вокруг машины, колесо — ближе/дальше,
 // V (держать) — взгляд назад, двойной клик — сразу вернуть. Отпустил — камера сама
 // плавно возвращается за машину: на ходу через 1.5 с, на стоянке через 6 с.
+// G — свободный полёт (временное, чтобы осматривать город): WASD, E/Q — выше/ниже, Shift — быстрее.
 
 import * as THREE from 'three';
 
@@ -26,6 +27,7 @@ export class ChaseCamera {
     this.dragging = false;
     this.idle = 99; // секунд с последнего движения мышью
     this.back = false;
+    this.fly = null; // { yaw, pitch } — свободный полёт
     this.bind(dom);
   }
 
@@ -41,6 +43,13 @@ export class ChaseCamera {
     });
     dom.addEventListener('pointermove', (e) => {
       if (!this.dragging) return;
+      if (this.fly) {
+        this.fly.yaw -= (e.clientX - px) * 0.005;
+        this.fly.pitch = THREE.MathUtils.clamp(this.fly.pitch - (e.clientY - py) * 0.005, -1.5, 1.5);
+        px = e.clientX;
+        py = e.clientY;
+        return;
+      }
       this.lookYaw -= (e.clientX - px) * 0.006;
       this.lookPitch = THREE.MathUtils.clamp(this.lookPitch + (e.clientY - py) * 0.004, -0.25, 0.9);
       px = e.clientX;
@@ -68,13 +77,37 @@ export class ChaseCamera {
     this.snapBack = true;
   }
 
+  toggleFly() {
+    if (this.fly) { this.fly = null; this.reset(); return; }
+    const d = new THREE.Vector3();
+    this.camera.getWorldDirection(d);
+    this.fly = { yaw: Math.atan2(-d.x, -d.z), pitch: Math.asin(THREE.MathUtils.clamp(d.y, -1, 1)) };
+  }
+
+  // Полёт: keys — { up, down, left, right, rise, sink, fast }. Стрелки ◀▶ на телефоне — поворот.
+  updateFly(dt, keys, touchTurn) {
+    const f = this.fly;
+    if (touchTurn) f.yaw += ((keys.left ? 1 : 0) - (keys.right ? 1 : 0)) * dt * 1.5;
+    const sp = (keys.fast ? 60 : 18) * dt;
+    const fx = -Math.sin(f.yaw) * Math.cos(f.pitch), fy = Math.sin(f.pitch), fz = -Math.cos(f.yaw) * Math.cos(f.pitch);
+    const rx = Math.cos(f.yaw), rz = -Math.sin(f.yaw);
+    const fwd = (keys.up ? 1 : 0) - (keys.down ? 1 : 0), side = touchTurn ? 0 : (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+    const p = this.camera.position;
+    p.x += (fx * fwd + rx * side) * sp;
+    p.z += (fz * fwd + rz * side) * sp;
+    p.y = Math.max(0.5, p.y + fy * fwd * sp + ((keys.rise ? 1 : 0) - (keys.sink ? 1 : 0)) * sp);
+    this.camera.lookAt(p.x + fx, p.y + fy, p.z + fz);
+    this.pos.copy(p);
+  }
+
   nextMode() {
     this.mode = (this.mode + 1) % MODES.length;
     this.lookYaw = this.lookPitch = 0;
   }
 
+  // car — машина или пешеход (у него свой режим камеры camMode).
   update(dt, car) {
-    const m = MODES[this.mode];
+    const m = car.camMode ?? MODES[this.mode];
     // Камера поворачивает вслед за машиной с запаздыванием — так чувствуется поворот.
     if (this.yaw === null) this.yaw = car.h;
     let d = car.h - this.yaw;

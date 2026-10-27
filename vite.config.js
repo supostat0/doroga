@@ -6,6 +6,15 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 const facadeSaver = {
   name: 'facade-saver',
   configureServer(server) {
+    // Очередь авторежима: какие снимки Mapillary нашлись перед какими стенами (data/, не в игру).
+    server.middlewares.use('/__facade/shots', (req, res) => {
+      const file = 'data/facade-shots.json';
+      res.setHeader('Content-Type', 'application/json');
+      if (req.method === 'GET') { res.end(existsSync(file) ? readFileSync(file) : '[]'); return; }
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => { writeFileSync(file, JSON.stringify(JSON.parse(body), null, 1) + '\n'); res.end('{}'); });
+    });
     server.middlewares.use('/__facade', (req, res) => {
       if (req.method !== 'POST') { res.statusCode = 405; res.end(); return; }
       let body = '';

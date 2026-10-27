@@ -4,7 +4,8 @@
 import * as THREE from 'three';
 import { patchMaterial } from './shaders.js';
 import { rng } from './geom.js';
-import { addVoxelPortico } from './voxels.js';
+import { findKazan, addKazan, COL_FLOOR, COL_TOP } from './kazan.js';
+import { DOOR_SIZE } from './doors.js';
 
 // Палитра петербургских фасадов.
 const PALETTE = ['#d8b67a', '#e4cd95', '#cf9a84', '#bcc4ae', '#cbb6a4', '#b1aeb3', '#d9ab8b', '#e2dac8', '#c8a46e', '#d3c29c'];
@@ -16,7 +17,43 @@ export function buildBuildings(map, scene, photoWalls = []) {
   const nrm = [];
   const uv = [];
   const colr = [];
-  const preset = []; // особый фасад: 0 — обычный, 10 Гостиный, 11 Зингер, 12 Пассаж, 13 Дума
+  const wallAttr = []; // прямая стена: [начало u, длина, простенок у проёма 0/1] — для раскладки окон
+  const NO_WALL = [0, 0, 0];
+  let wcur = NO_WALL;
+  // Проёмы первого этажа (арки, двери) — точками на карте: стена, которая через них проходит,
+  // получает простенок (а у арки — вырез), чья бы она ни была — дома или его части (у частей своя
+  // стена в 5 см перед стеной дома, и по номеру ребра проём на неё не попадал).
+  const openings = [];
+  const pointOn = (q) => {
+    const bd = map.buildings[q.b], ring = [bd.o, ...bd.i][q.r], a = ring[q.e], c = ring[(q.e + 1) % ring.length];
+    const L = Math.hypot(c[0] - a[0], c[1] - a[1]);
+    return [a[0] + ((c[0] - a[0]) * q.u) / L, a[1] + ((c[1] - a[1]) * q.u) / L];
+  };
+  for (const q of map.passages ?? []) openings.push({ p: pointOn(q), hw: q.w / 2 + 0.3, arch: q });
+  for (const d of map.doors ?? []) openings.push({ p: pointOn(d), hw: (DOOR_SIZE[d.kind] ?? DOOR_SIZE.yes)[0] / 2 + 0.1, door: d });
+  const openGrid = new Map();
+  for (const o of openings) {
+    const k = `${Math.floor(o.p[0] / 8)},${Math.floor(o.p[1] / 8)}`;
+    if (!openGrid.has(k)) openGrid.set(k, []);
+    openGrid.get(k).push(o);
+  }
+  // Проёмы на прямой ребра a→c (в 0.35 м от неё, вдоль — с запасом 3 м: пролёт проёма заходит и на
+  // соседние рёбра той же стены — OSM дробит фасад на куски по 2–3 м): [{ u, hw, arch }].
+  const openingsOn = (a, c, L) => {
+    const out = [], seen = new Set();
+    const x0 = Math.floor((Math.min(a[0], c[0]) - 4) / 8), x1 = Math.floor((Math.max(a[0], c[0]) + 4) / 8);
+    const z0 = Math.floor((Math.min(a[1], c[1]) - 4) / 8), z1 = Math.floor((Math.max(a[1], c[1]) + 4) / 8);
+    for (let gx = x0; gx <= x1; gx++) for (let gz = z0; gz <= z1; gz++) for (const o of openGrid.get(`${gx},${gz}`) ?? []) {
+      if (seen.has(o)) continue;
+      seen.add(o);
+      const t = ((o.p[0] - a[0]) * (c[0] - a[0]) + (o.p[1] - a[1]) * (c[1] - a[1])) / L;
+      if (t < -3 || t > L + 3) continue;
+      const d = Math.abs((o.p[0] - a[0]) * (c[1] - a[1]) - (o.p[1] - a[1]) * (c[0] - a[0])) / L; // до прямой
+      if (d < 0.35) out.push({ u: t, hw: o.hw, arch: o.arch, door: o.door });
+    }
+    return out;
+  };
+  const preset = []; // особый фасад: 0 — обычный, 10 Гостиный, 11 Зингер, 12 Пассаж, 13 Дума, 14 метро, 15 Казанский, 16 казённое здание
   const clocks = [];
   const info = [];
   const colliders = [];
@@ -26,6 +63,7 @@ export function buildBuildings(map, scene, photoWalls = []) {
   const tmpC = new THREE.Color();
 
   // Части храмов (барабан купола и т. п.) в OSM без имени — узнаём их по контуру храма.
+  const kazan = findKazan(map);
   const churchRings = map.buildings.filter((b) => b.name && /собор|церковь|базилика/i.test(b.name)).map((b) => b.o);
   map.buildings.forEach((b, bi) => {
     const r = rng(bi * 2654435761 + 7);
@@ -42,9 +80,10 @@ export function buildBuildings(map, scene, photoWalls = []) {
     const base = b.mh;
     const small = top < 6;
     const seed = r();
-    const presetId = { gostiny: 10, singer: 11, passage: 12, duma: 13, metro: 14 }[b.facade] ?? 0;
+    const presetId = kazan && (b === kazan.b || b === kazan.drum?.b) ? 15 : { gostiny: 10, singer: 11, passage: 12, duma: 13, metro: 14, civic: 16 }[b.facade] ?? 0;
     if (b.clock) clocks.push(b);
     const push = (x, y, z, nx, ny, nz, u, v, roof) => {
+      wallAttr.push(...wcur);
       pos.push(x, y, z);
       nrm.push(nx, ny, nz);
       uv.push(u, v);
@@ -56,8 +95,21 @@ export function buildBuildings(map, scene, photoWalls = []) {
     // Части зданий (building:part) часто стоят стена в стену с родителем — отодвигаем их
     // стены на 5 см наружу, иначе две стены в одной плоскости мерцают (z-fighting).
     const partOff = b.pt ? 0.05 : 0;
-    for (const ring0 of [b.o, ...b.i]) {
+    for (const [ri, ring0] of [b.o, ...b.i].entries()) {
       const ring = partOff ? ring0.map((_, i) => ringOffset(ring0, i, partOff)) : ring0;
+      // Прямые стены: подряд рёбра с поворотом меньше 12° (OSM дробит фасад на отрезки). Окна
+      // раскладываются по прямой стене целиком — целое число окон, шаг подогнан под длину: окно
+      // не режется углом и стыком с соседним домом (docs/LESSONS.md). wall[i] = [начало u, длина].
+      const elen = ring.map((p, i) => Math.hypot(ring[(i + 1) % ring.length][0] - p[0], ring[(i + 1) % ring.length][1] - p[1]));
+      const ehead = ring.map((p, i) => Math.atan2(ring[(i + 1) % ring.length][1] - p[1], ring[(i + 1) % ring.length][0] - p[0]));
+      const wall = [];
+      for (let i = 0, run = 0; i < ring.length;) {
+        let j = i, len = elen[i];
+        while (j + 1 < ring.length && Math.abs(Math.atan2(Math.sin(ehead[j + 1] - ehead[j]), Math.cos(ehead[j + 1] - ehead[j]))) < 0.21) len += elen[++j];
+        for (let k = i; k <= j; k++) wall[k] = [run, len];
+        run += len;
+        i = j + 1;
+      }
       let u = 0;
       for (let i = 0; i < ring.length; i++) {
         const a = ring[i];
@@ -69,13 +121,71 @@ export function buildBuildings(map, scene, photoWalls = []) {
         // Наружная нормаль: внешние кольца положительны, внутренние отрицательны.
         const nx = dz / L;
         const nz = -dx / L;
-        const quad = [
-          [a[0], base, a[1], u, base], [c[0], base, c[1], u + L, base], [c[0], top, c[1], u + L, top],
-          [a[0], base, a[1], u, base], [c[0], top, c[1], u + L, top], [a[0], top, a[1], u, top],
-        ];
-        orient(quad, nx, 0, nz);
-        for (const q of quad) push(q[0], q[1], q[2], nx, 0, nz, q[3], q[4], false);
-        if (base < 2) colliders.push([a[0], a[1], c[0], c[1]]);
+        // На дугах колоннады Казанского стена — только цоколь и антаблемент, между ними галерея.
+        // Торцы павильонов крыльев строит kazan.js целиком (стена с аркой).
+        const own = kazan && b === kazan.b && ring === b.o;
+        const bands = own && kazan.skip.has(i) ? [] : own && kazan.edges.has(i) ? [[base, COL_FLOOR], [COL_TOP, top]] : [[base, top]];
+        // Проёмы первого этажа на этой стене (по геометрии): вокруг них простенок без витрин (plain),
+        // у арок — вырез.
+        const here = own || base > 2 ? [] : openingsOn(a, c, L);
+        const holes = here.filter((o) => o.arch && o.u >= 0 && o.u <= L && L > o.arch.w + 0.1).map((o) => ({ ...o.arch, u: Math.min(L - o.arch.w / 2 - 0.05, Math.max(o.arch.w / 2 + 0.05, o.u)) }));
+        // Простенок — целыми пролётами окон (раскладка как в шейдере): витрина не режется пополам,
+        // проём встаёт в свой пролёт вместо неё.
+        const base0 = presetId === 16 ? 3 : 2.7 + ((seed * 13) % 1) * 0.5;
+        const sp = wall[i][1] / Math.max(1, Math.round(wall[i][1] / base0)), eo = u - wall[i][0];
+        const opens = here.map((o) => {
+          const c0 = Math.floor((eo + o.u - o.hw) / sp), c1 = Math.floor((eo + o.u + o.hw) / sp);
+          // Дверь — по центру своего пролёта (doors.js берёт точку at): так она не задевает соседнюю витрину.
+          if (o.door && o.u >= 0 && o.u <= L && wall[i][1] > 1.8) {
+            const x = Math.min(L, Math.max(0, ((c0 + c1 + 1) / 2) * sp - eo));
+            o.door.at = [a[0] + (dx / L) * x, a[1] + (dz / L) * x];
+          }
+          return [c0 * sp - eo, (c1 + 1) * sp - eo];
+        });
+        const plainIv = [];
+        for (const [q0, q1] of opens.sort((p, q) => p[0] - q[0])) {
+          const p0 = Math.max(0, q0), p1 = Math.min(L, q1), last = plainIv[plainIv.length - 1];
+          if (last && p0 <= last[1]) last[1] = Math.max(last[1], p1); else plainIv.push([p0, p1]);
+        }
+        const pieces = [];
+        let at = 0;
+        for (const [p0, p1] of plainIv) { if (p0 > at) pieces.push([at, p0, 0]); pieces.push([p0, p1, 1]); at = p1; }
+        if (at < L) pieces.push([at, L, 0]);
+        for (const [y0, y1] of bands) {
+          for (const [p0, p1, plain] of bands.length > 1 ? [[0, L, 0]] : pieces) {
+            wcur = [wall[i][0], wall[i][1], plain];
+            // Кусок стены: контур (вдоль стены, высота), у арок — вырезы снизу; триангуляция.
+            const pts = [[p0, y0]];
+            for (const q of holes.filter((h) => h.u >= p0 && h.u <= p1).sort((p, s) => p.u - s.u)) {
+              const r = q.w / 2, spring = base + q.h - r;
+              pts.push([q.u - r, y0], [q.u - r, spring]);
+              for (let k = 1; k < 10; k++) {
+                const ang = Math.PI - (k / 10) * Math.PI;
+                pts.push([q.u + r * Math.cos(ang), spring + r * Math.sin(ang)]);
+              }
+              pts.push([q.u + r, spring], [q.u + r, y0]);
+            }
+            pts.push([p1, y0], [p1, y1], [p0, y1]);
+            for (const t of THREE.ShapeUtils.triangulateShape(pts.map(([x, y]) => new THREE.Vector2(x, y)), [])) {
+              const tri = t.map((k) => [a[0] + (dx / L) * pts[k][0], pts[k][1], a[1] + (dz / L) * pts[k][0], u + pts[k][0], pts[k][1]]);
+              orient(tri, nx, 0, nz);
+              for (const q of tri) push(q[0], q[1], q[2], nx, 0, nz, q[3], q[4], false);
+            }
+          }
+        }
+        wcur = NO_WALL;
+        if (base < 2) {
+          // Проём арки — препятствие только для машины (6-й элемент 1): пешком во двор пройти можно.
+          let s0 = 0;
+          for (const q of [...holes].sort((p, q2) => p.u - q2.u)) {
+            const p0 = Math.max(s0, q.u - q.w / 2), p1 = Math.min(L, q.u + q.w / 2);
+            const pt = (d) => [a[0] + (dx / L) * d, a[1] + (dz / L) * d];
+            if (p0 > s0) colliders.push([...pt(s0), ...pt(p0)]);
+            colliders.push([...pt(p0), ...pt(p1), 0, 1]);
+            s0 = p1;
+          }
+          colliders.push([a[0] + (dx / L) * s0, a[1] + (dz / L) * s0, c[0], c[1]]);
+        }
         if (ring === b.o && base < 2 && top > 6 && L > 2.5) facades.push({ a, b: c, n: [nx, nz], L, h: top, church: isChurch });
         u += L;
       }
@@ -86,6 +196,7 @@ export function buildBuildings(map, scene, photoWalls = []) {
     const roofY = solid ? top + 1.4 : top;
     if (solid) {
       const kind4 = (x, y, z, nx, ny, nz, u, roofFlag) => {
+        wallAttr.push(...NO_WALL);
         pos.push(x, y, z);
         nrm.push(nx, ny, nz);
         uv.push(u, y);
@@ -152,6 +263,7 @@ export function buildBuildings(map, scene, photoWalls = []) {
   g.setAttribute('aColor', new THREE.Float32BufferAttribute(colr, 3));
   g.setAttribute('aInfo', new THREE.Float32BufferAttribute(info, 4));
   g.setAttribute('aPreset', new THREE.Float32BufferAttribute(preset, 1));
+  g.setAttribute('aWall', new THREE.Float32BufferAttribute(wallAttr, 3));
   g.computeBoundingSphere();
 
   const mesh = new THREE.Mesh(g, facadeMaterial());
@@ -159,7 +271,7 @@ export function buildBuildings(map, scene, photoWalls = []) {
   addDomes(domes, scene);
   addChimneys(chimneys, scene);
   addClocks(clocks, scene);
-  addPediment(map, scene, colliders);
+  if (kazan) addKazan(kazan, scene, colliders);
 
   return { colliders, facades, chimneys };
 }
@@ -356,43 +468,6 @@ const PRESETS_GLSL = /* glsl */ `
   gEmit += col * vec3(1.0, 0.86, 0.66) * flood * (0.6 + 0.4 * smoothstep(top, 0.0, y));
 `;
 
-// Центральный портик Казанского собора (из кубиков) над серединой колоннады,
-// обращённой к Невскому (точка контура, ближайшая к оси проспекта).
-function addPediment(map, scene, colliders) {
-  const kazan = map.buildings.find((b) => b.name === 'Казанский собор' && b.o.length > 50);
-  const nevsky = map.roads.filter((r) => r.name === 'Невский проспект' && r.kind === 'drive');
-  if (!kazan || !nevsky.length) return;
-  // Луч от купола к ближайшей точке Невского: первое пересечение с контуром со стороны проспекта —
-  // середина колоннады.
-  const dome = map.buildings.find((b) => b.roof === 'dome' && b.o.some((p) => Math.hypot(p[0] - kazan.o[0][0], p[1] - kazan.o[0][1]) < 120));
-  if (!dome) return;
-  const dc = dome.o.reduce((acc, p) => [acc[0] + p[0] / dome.o.length, acc[1] + p[1] / dome.o.length], [0, 0]);
-  let np = null;
-  let nd = Infinity;
-  for (const r of nevsky) for (const p of r.p) {
-    const d = Math.hypot(p[0] - dc[0], p[1] - dc[1]);
-    if (d < nd) { nd = d; np = p; }
-  }
-  let best = null;
-  let bt = Infinity;
-  for (let i = 0; i < kazan.o.length; i++) {
-    const a = kazan.o[i], c = kazan.o[(i + 1) % kazan.o.length];
-    const rx = np[0] - dc[0], rz = np[1] - dc[1], sx = c[0] - a[0], sz = c[1] - a[1];
-    const den = rx * sz - rz * sx;
-    if (Math.abs(den) < 1e-9) continue;
-    const t = ((a[0] - dc[0]) * sz - (a[1] - dc[1]) * sx) / den;
-    const u = ((a[0] - dc[0]) * rz - (a[1] - dc[1]) * rx) / den;
-    if (u < 0 || u > 1 || t < 0) continue;
-    const dist = Math.abs(1 - t); // ближе всего к Невскому
-    if (dist < bt) { bt = dist; best = { m: [dc[0] + rx * t, dc[1] + rz * t], a, c }; }
-  }
-  if (!best) return;
-  const { m, a, c } = best;
-  const L = Math.hypot(c[0] - a[0], c[1] - a[1]) || 1;
-  const nx = (c[1] - a[1]) / L, nz = -(c[0] - a[0]) / L; // наружу
-  colliders.push(...addVoxelPortico(scene, m, nx, nz));
-}
-
 function addClocks(list, scene) {
   if (!list.length) return;
   const cv = document.createElement('canvas');
@@ -437,9 +512,9 @@ function facadeMaterial() {
   const m = new THREE.MeshLambertMaterial({ color: 0xffffff });
   const patched = patchMaterial(m, {
     emissive: true,
-    vertexHeader: 'attribute vec4 aInfo; attribute vec3 aColor; attribute vec2 aUv; attribute float aPreset; varying vec4 vInfo; varying vec2 vUv2; varying vec3 vCol; varying vec3 vWN; varying float vPreset;',
-    vertexMain: 'vInfo = aInfo; vUv2 = aUv; vCol = aColor; vPreset = aPreset; vWN = normalize(mat3(modelMatrix) * objectNormal);',
-    header: 'varying vec4 vInfo; varying vec2 vUv2; varying vec3 vCol; varying vec3 vWN; varying float vPreset;',
+    vertexHeader: 'attribute vec4 aInfo; attribute vec3 aColor; attribute vec2 aUv; attribute float aPreset; attribute vec3 aWall; varying vec4 vInfo; varying vec2 vUv2; varying vec3 vCol; varying vec3 vWN; varying float vPreset; varying vec3 vWall;',
+    vertexMain: 'vInfo = aInfo; vUv2 = aUv; vCol = aColor; vPreset = aPreset; vWall = aWall; vWN = normalize(mat3(modelMatrix) * objectNormal);',
+    header: 'varying vec4 vInfo; varying vec2 vUv2; varying vec3 vCol; varying vec3 vWN; varying float vPreset; varying vec3 vWall;',
     colorCode: /* glsl */ `
       vec3 wall = vCol;
       float top = vInfo.x;
@@ -462,9 +537,10 @@ function facadeMaterial() {
         if (kind > 2.5 && kind < 3.5) {
           // Храм: колоннада, антаблемент, цоколь.
           float fx = fract(u / 2.4);
-          float column = smoothstep(0.26, 0.3, abs(fx - 0.5)) ;
+          // У Казанского колонны и пилястры — геометрия (kazan.js), стена гладкая.
+          float column = vPreset > 14.5 ? 0.0 : smoothstep(0.26, 0.3, abs(fx - 0.5)) ;
           float shaft = 1.0 - column;
-          float shadeC = 0.75 + 0.35 * sin((fx - 0.5) * 3.1416 / 0.44 * 0.5 + 1.57);
+          float shadeC = vPreset > 14.5 ? 0.8 : 0.75 + 0.35 * sin((fx - 0.5) * 3.1416 / 0.44 * 0.5 + 1.57);
           vec3 stone = wall * 1.05;
           col = mix(stone * 0.12, stone * shadeC, shaft); // между колоннами — глубина галереи
           float entab = step(top - 4.0, y);
@@ -481,17 +557,34 @@ function facadeMaterial() {
         } else if (kind < 0.5 && vPreset > 9.5 && vPreset < 13.5) {
           ${PRESETS_GLSL}
         } else if (kind < 0.5) {
+          bool metro = abs(vPreset - 14.0) < 0.5;
+          // «Казённое здание» (классицизм): внизу руст и обычные окна вместо витрин, белые наличники,
+          // шаг окон ровно 3 м — по нему ставятся пилястры ризалита (src/elements.js).
+          bool civic = abs(vPreset - 16.0) < 0.5;
           float floorH = 3.8;
-          float groundH = 4.6;
+          float groundH = civic ? 0.0 : 4.6;
           float corniceY = top - 1.1; // низ настоящего (геометрического) карниза
           // Стиль дома: 0 доходный с сандриками, 1 классицизм с пилястрами, 2 модерн с арками, 3 эклектика с балконами.
-          float style = vPreset > 13.5 ? 0.0 : floor(fract(seed * 7.0) * 4.0);
+          float style = metro ? 0.0 : civic ? 1.0 : floor(fract(seed * 7.0) * 4.0);
 
-          float spacing = 2.7 + fract(seed * 13.0) * 0.5;
-          float cell = floor(u / spacing);
-          float fx = fract(u / spacing);
+          // Окна — по прямой стене целиком: целое число, шаг подогнан под её длину (vWall: начало u, длина,
+          // простенок у проёма). Короткий выступ — без окон.
+          float base0 = civic ? 3.0 : 2.7 + fract(seed * 13.0) * 0.5;
+          float nb = floor(vWall.y / base0 + 0.5);
+          float spacing = nb > 0.5 ? vWall.y / nb : 1e4;
+          float xw = u - vWall.x;
+          float cell = floor(xw / spacing);
+          float fx = fract(xw / spacing);
+          float noWin = step(vWall.y, 1.8);
+          float plain = vWall.z;
           float lit = hash12(vec2(cell, floor(y / floorH)) + seed * 91.0);
-          if (y < groundH && vPreset > 13.5) {
+          // Проёмы утоплены: луч взгляда, пройдя глубину откоса, попадает на стекло со сдвигом;
+          // если сдвинутая точка вне проёма — видим откос. (u растёт вдоль стены, T — это направление.)
+          vec3 T = vec3(-vWN.z, 0.0, vWN.x);
+          vec3 V = normalize(vWorld - cameraPosition);
+          float vn = max(-dot(V, vWN), 0.25);
+          vec2 look = vec2(dot(V, T), V.y) / vn; // сдвиг (u, y) на метр глубины
+          if (y < groundH && metro) {
             // Вестибюль метро (как в жизни): бирюзовая стена, узкие арочные двери в белых наличниках,
             // внутри тёплый свет; между дверями — гладкая стена.
             float bay = 4.0;
@@ -508,32 +601,43 @@ function facadeMaterial() {
             // Первый этаж: руст и большие витрины.
             float rust = step(0.92, fract(y / 0.55));
             col = mix(col, col * 0.75, rust);
-            float shop = step(0.12, fx) * step(fx, 0.88) * step(0.35, y) * step(y, 3.6);
-            vec3 glass = mix(vec3(0.05, 0.055, 0.07), vec3(0.16, 0.17, 0.2), smoothstep(0.35, 3.6, y));
-            col = mix(col, glass, shop);
+            float shop = step(0.12, fx) * step(fx, 0.88) * step(0.35, y) * step(y, 3.6) * (1.0 - noWin) * (1.0 - plain);
+            // Стекло витрины на 35 см глубже стены.
+            vec2 sg = vec2(u, y) + look * 0.35;
+            float sfx = fx + (sg.x - u) / spacing;
+            float shopG = shop * step(0.12, sfx) * step(sfx, 0.88) * step(0.35, sg.y) * step(sg.y, 3.6);
+            vec3 glass = mix(vec3(0.05, 0.055, 0.07), vec3(0.16, 0.17, 0.2), smoothstep(0.35, 3.6, sg.y));
+            col = mix(col, glass, shopG);
+            col = mix(col, wall * (sg.y > 3.6 ? 0.4 : 0.62), shop - shopG); // откос: верхний в тени
             // Витрина: рама, фрамуга сверху, внутри — силуэты товаров и полок.
-            float mull = step(abs(fx - 0.5), 0.012) + step(abs(y - 2.85), 0.035);
-            float goods = step(0.45, vnoise(vec2(u * 3.0, floor(y * 2.2)) + seed * 17.0)) * step(y, 2.4) * step(0.6, y);
-            float shelf = step(fract(y * 2.2), 0.08) * step(y, 2.4);
+            float mull = step(abs(sfx - 0.5), 0.012) + step(abs(sg.y - 2.85), 0.035);
+            float goods = step(0.45, vnoise(vec2(sg.x * 3.0, floor(sg.y * 2.2)) + seed * 17.0)) * step(sg.y, 2.4) * step(0.6, sg.y);
+            float shelf = step(fract(sg.y * 2.2), 0.08) * step(sg.y, 2.4);
             vec3 shopLight = mix(vec3(1.0, 0.72, 0.42), vec3(1.0, 0.9, 0.75), hash12(vec2(cell, 7.0) + seed));
-            float inside = shop * (1.0 - min(1.0, mull)) * (1.0 - goods * 0.6) * (1.0 - shelf * 0.5);
+            float inside = shopG * (1.0 - min(1.0, mull)) * (1.0 - goods * 0.6) * (1.0 - shelf * 0.5);
             // Глубина проёма: тень от верхнего откоса.
-            inside *= 1.0 - 0.5 * step(3.35, y);
-            col = mix(col, vec3(0.1), shop * min(1.0, mull));
+            inside *= 1.0 - 0.5 * step(3.35, sg.y);
+            col = mix(col, vec3(0.1), shopG * min(1.0, mull));
             gEmit += inside * shopLight * (0.4 + 0.3 * smoothstep(3.6, 0.35, y)) * step(0.25, lit);
             // Тень под межэтажной тягой.
             col *= 1.0 - 0.35 * smoothstep(4.0, 4.5, y) * (1.0 - shop);
           } else if (y < corniceY) {
             float fy = mod(y - groundH, floorH);
             float floorN = floor((y - groundH) / floorH);
-            float dxw = abs(fx - 0.5);
+            float dxw = abs(fx - 0.5) + noWin + plain * step(y, floorH) * (civic ? 1.0 : 0.0); // нет окна — нет и наличников
             // Верх окна: у модерна — арка.
             float winTop = style == 2.0 ? 2.5 + 0.4 * sqrt(max(0.0, 1.0 - pow(dxw / 0.18, 2.0))) : 2.9;
             float win = step(dxw, 0.18) * step(0.9, fy) * step(fy, winTop);
             float frame = step(dxw, 0.2) * step(0.8, fy) * step(fy, winTop + 0.12) - win;
             float sill = step(dxw, 0.22) * step(0.72, fy) * step(fy, 0.86);
-            float mullion = win * (step(dxw, 0.012) + step(abs(fy - 2.2), 0.04));
-            vec3 glass = mix(vec3(0.1, 0.11, 0.14), vec3(0.34, 0.35, 0.4), smoothstep(0.9, 2.9, fy) * 0.6);
+            // Стекло окна на 25 см глубже стены (та же ячейка, сдвинутая точка).
+            vec2 wg = vec2(fx + look.x * 0.25 / spacing, fy + look.y * 0.25);
+            float gdx = abs(wg.x - 0.5);
+            float gTop = style == 2.0 ? 2.5 + 0.4 * sqrt(max(0.0, 1.0 - pow(gdx / 0.18, 2.0))) : 2.9;
+            float winG = win * step(gdx, 0.18) * step(0.9, wg.y) * step(wg.y, gTop);
+            float jamb = win - winG;
+            float mullion = winG * (step(gdx, 0.012) + step(abs(wg.y - 2.2), 0.04));
+            vec3 glass = mix(vec3(0.1, 0.11, 0.14), vec3(0.34, 0.35, 0.4), smoothstep(0.9, 2.9, wg.y) * 0.6);
             // Окна живут: у каждого свой период, иногда свет гаснет или зажигается.
             float period = 25.0 + lit * 70.0;
             float epoch = floor((uTime + lit * 997.0) / period);
@@ -562,20 +666,23 @@ function facadeMaterial() {
               col = mix(col, vec3(0.88, 0.89, 0.94), step(dxw, 0.42) * step(0.68, fy) * step(fy, 0.72));
             }
 
-            col = mix(col, vPreset > 13.5 ? vec3(0.88, 0.9, 0.92) : wall * 1.15, frame);
-            col = mix(col, glass, win);
+            if (civic && y < floorH - 0.2) col = mix(col, col * 0.78, step(0.9, fract(y / 0.55))); // руст первого этажа
+            col = mix(col, metro || civic ? vec3(0.88, 0.9, 0.92) : wall * 1.15, frame);
+            col = mix(col, glass, winG);
+            // Откос: верхний в тени, нижний (подоконник изнутри) светлее, боковые между ними.
+            col = mix(col, wall * (wg.y > gTop ? 0.38 : wg.y < 0.9 ? 0.85 : 0.6), jamb);
             col = mix(col, vec3(0.92), mullion * 0.9);
             col = mix(col, vec3(0.9, 0.9, 0.95), sill);
-            // Глубина окна: тень от верхнего и левого откоса.
-            float reveal = win * max(step(winTop - 0.22, fy), step(dxw, 0.18) * step(fx, 0.36));
+            // Тень на стекле у верхнего откоса.
+            float reveal = winG * step(gTop - 0.22, wg.y);
             col *= 1.0 - 0.45 * reveal;
             // Тень под карнизом.
             col *= 1.0 - 0.45 * smoothstep(corniceY - 0.8, corniceY, y);
-            if (vPreset > 13.5) gEmit += col * vec3(0.55, 0.75, 0.85) * 0.22; // фасад вестибюля подсвечен
+            if (metro) gEmit += col * vec3(0.55, 0.75, 0.85) * 0.22; // фасад вестибюля подсвечен
             float tint = hash12(vec2(cell, floor(y / floorH)) + seed * 13.0);
             vec3 wc = tint < 0.12 ? vec3(0.55, 0.7, 1.0) : mix(vec3(1.0, 0.62, 0.3), vec3(1.0, 0.85, 0.6), tint);
-            float curtain = smoothstep(0.32, 0.4, fx) * smoothstep(0.68, 0.6, fx);
-            gEmit += win * (1.0 - mullion) * on * wc * (0.35 + 0.45 * curtain) * (1.0 - 0.5 * reveal);
+            float curtain = smoothstep(0.32, 0.4, wg.x) * smoothstep(0.68, 0.6, wg.x);
+            gEmit += winG * (1.0 - mullion) * on * wc * (0.35 + 0.45 * curtain) * (1.0 - 0.5 * reveal);
           }
         }
       }

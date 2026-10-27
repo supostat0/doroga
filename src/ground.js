@@ -24,7 +24,7 @@ export function buildGround(map, scene) {
   tex.anisotropy = 8;
   tex.needsUpdate = true;
 
-  const material = groundMaterial(tex, x0, z0, W, H, nevskyAngle(map));
+  const material = groundMaterial(tex, x0, z0, W, H, nevskyAngle(map), null, nevskyPoint(map));
 
   // Земля с дырами под воду.
   const shape = new THREE.Shape([
@@ -52,7 +52,7 @@ export function buildGround(map, scene) {
   const waterTex = new THREE.CanvasTexture(waterCv);
   waterTex.flipY = false;
   const center = { value: new THREE.Vector2() };
-  const nearMat = groundMaterial(tex, x0, z0, W, H, nevskyAngle(map), { water: waterTex, center });
+  const nearMat = groundMaterial(tex, x0, z0, W, H, nevskyAngle(map), { water: waterTex, center }, nevskyPoint(map));
   const n = Math.round(NEAR_SIZE / NEAR_STEP);
   const nearGeo = new THREE.PlaneGeometry(NEAR_SIZE, NEAR_SIZE, n, n);
   nearGeo.rotateX(-Math.PI / 2);
@@ -166,7 +166,7 @@ export function buildGround(map, scene) {
 }
 
 // near — подробная земля вокруг камеры: тротуары подняты на высоту бордюра, над водой — дыра.
-function groundMaterial(tex, x0, z0, W, H, gridAngle, near = null) {
+function groundMaterial(tex, x0, z0, W, H, gridAngle, near, nevP) {
   const rect = new THREE.Vector4(x0, z0, 1 / W, 1 / H);
   return patchMaterial(new THREE.MeshLambertMaterial({ color: 0xffffff, polygonOffset: !near, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }), {
     emissive: true,
@@ -174,6 +174,7 @@ function groundMaterial(tex, x0, z0, W, H, gridAngle, near = null) {
       uMask: { value: tex },
       uRect: { value: rect },
       uGrid: { value: new THREE.Vector2(Math.cos(gridAngle), Math.sin(gridAngle)) },
+      uNevP: { value: new THREE.Vector2(...nevP) },
       ...(near ? { uWater: { value: near.water }, uCenter: near.center } : {}),
     },
     vertexHeader: near ? 'uniform sampler2D uMask; uniform vec4 uRect; uniform vec2 uCenter;' : '',
@@ -184,7 +185,7 @@ function groundMaterial(tex, x0, z0, W, H, gridAngle, near = null) {
       float fade = 1.0 - smoothstep(${(NEAR_SIZE / 2 - 18).toFixed(1)}, ${(NEAR_SIZE / 2 - 2).toFixed(1)}, max(abs(transformed.x), abs(transformed.z)));
       transformed.y += ${KERB_H.toFixed(2)} * (1.0 - smoothstep(0.25, 0.6, rd)) * fade;
     ` : '',
-    header: 'uniform sampler2D uMask; uniform vec4 uRect; uniform vec2 uGrid;' + (near ? ' uniform sampler2D uWater;' : ''),
+    header: 'uniform sampler2D uMask; uniform vec4 uRect; uniform vec2 uGrid; uniform vec2 uNevP;' + (near ? ' uniform sampler2D uWater;' : ''),
     colorCode: (near ? 'if (texture2D(uWater, (vWorld.xz - uRect.xy) * uRect.zw).r > 0.5) discard;\n' : '') + /* glsl */ `
       vec2 muv = (vWorld.xz - uRect.xy) * uRect.zw;
       vec4 m = texture2D(uMask, muv);
@@ -197,17 +198,28 @@ function groundMaterial(tex, x0, z0, W, H, gridAngle, near = null) {
       vec3 snow = vec3(0.86, 0.87, 0.93) * (0.94 + 0.06 * mid);
       // Тротуар: утоптанный серый снег с проплешинами плитки.
       vec3 packed = mix(vec3(0.66, 0.66, 0.72), vec3(0.80, 0.80, 0.86), mid);
-      // Гранитная плитка, проступающая из-под снега; сетка — по направлению Невского.
-      vec2 g = mat2(uGrid.x, -uGrid.y, uGrid.y, uGrid.x) * p;
-      vec2 cell = fract(g / vec2(1.2, 0.8));
-      float seam = 1.0 - step(0.06, cell.x) * step(0.08, cell.y);
-      float bare = smoothstep(0.5, 0.72, fbm(p * 0.25 + 7.0));
-      vec3 slab = vec3(0.4, 0.39, 0.43) * (0.85 + 0.3 * hash12(floor(g / vec2(1.2, 0.8))));
+      // Плитка; сетка — по направлению Невского (g.x — вдоль, g.y — поперёк).
+      // На Невском — крупные гранитные плиты, в переулках — бетонный «кирпичик» вперевязку.
+      mat2 rot = mat2(uGrid.x, -uGrid.y, uGrid.y, uGrid.x);
+      vec2 g = rot * p;
+      float onNev = 1.0 - step(28.0, abs(g.y - (rot * uNevP).y));
+      vec2 size = mix(vec2(0.24, 0.12), vec2(1.2, 0.8), onNev);
+      float row = floor(g.y / size.y);
+      vec2 gb = vec2(g.x + mod(row, 2.0) * size.x * 0.5 * (1.0 - onNev), g.y); // перевязка у кирпичика
+      vec2 cell = fract(gb / size);
+      vec2 seamW = mix(vec2(0.1, 0.16), vec2(0.04, 0.06), onNev);
+      float seam = 1.0 - step(seamW.x, cell.x) * step(seamW.y, cell.y);
+      seam *= 1.0 - smoothstep(20.0, 55.0, distance(vWorld, cameraPosition)); // вдали швы не рябят
+      float tone = hash12(floor(gb / size));
+      vec3 slab = mix(vec3(0.42, 0.41, 0.43) * (0.85 + 0.3 * tone), vec3(0.4, 0.39, 0.43) * (0.8 + 0.35 * tone), onNev);
+      slab = mix(slab, slab * vec3(1.12, 0.92, 0.88), step(0.86, tone) * (1.0 - onNev)); // редкий красный кирпичик
       slab *= 1.0 - seam * 0.45;
+      float bare = smoothstep(0.5, 0.72, fbm(p * 0.25 + 7.0));
       packed = mix(packed, slab, bare * 0.7);
-      // Протоптанная тропинка: мокро и темнее.
-      float trod = smoothstep(0.1, 0.6, m.b) * (1.0 - smoothstep(0.3, 0.7, m.r));
-      packed = mix(packed, slab * 0.75, trod * (0.55 + 0.3 * mid));
+      // Где ходят — дворники расчистили: мокрая плитка видна целиком, снег только в швах.
+      float trod = smoothstep(0.05, 0.45, m.b) * (1.0 - smoothstep(0.3, 0.7, m.r));
+      vec3 wet = slab * 0.72 + vec3(0.06, 0.06, 0.07) * seam;
+      packed = mix(packed, wet, trod * (0.7 + 0.25 * mid));
       vec3 col0 = mix(snow, packed, m.g);
 
       // Проезжая часть: каша, колеи до мокрого асфальта, снег у бортика.
@@ -332,7 +344,7 @@ function drawMask(map, x0, z0, W, H) {
   ctx.globalAlpha = 0.55;
   for (const r of map.roads) {
     if (r.kind !== 'foot' || r.bridge) continue;
-    ctx.lineWidth = 1.4 * sx;
+    ctx.lineWidth = 2.6 * sx; // расчищенная дворниками полоса
     path(r.p);
     ctx.stroke();
   }
@@ -411,6 +423,17 @@ function outsideWider(pts, road, roads) {
   }
   if (run.length > 1) runs.push(run);
   return runs;
+}
+
+// Точка на оси Невского (середина самой длинной его дороги) — для плитки.
+function nevskyPoint(map) {
+  let best = [0, 0], bl = 0;
+  for (const r of map.roads) {
+    if (r.name !== 'Невский проспект' || r.kind !== 'drive') continue;
+    const a = r.p[0], b = r.p[r.p.length - 1], l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (l > bl) { bl = l; best = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]; }
+  }
+  return best;
 }
 
 function nevskyAngle(map) {

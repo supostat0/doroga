@@ -18,7 +18,7 @@ const SNOWY = {
 };
 
 // Материал «тёмный металл/кора со снегом сверху».
-function snowyMaterial(base, amount = 0.45) {
+export function snowyMaterial(base, amount = 0.45) {
   return patchMaterial(new THREE.MeshLambertMaterial({ color: base }), {
     ...SNOWY,
     colorCode: `

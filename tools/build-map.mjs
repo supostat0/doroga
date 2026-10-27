@@ -11,9 +11,11 @@ import {
   project, normalizeRing, assembleRings, clipRing, pointInRing, centroid,
   buildingHeights, signedArea, round2,
 } from './geo.mjs';
+import { findPassages, risalitRing, attachToWalls, throughPassages, PASSAGE } from './elements.mjs';
 
 const RAW = 'data/raw/center.osm.json';
 const OVERRIDES = JSON.parse(readFileSync('data/overrides.json', 'utf8'));
+const ELEMENTS = JSON.parse(readFileSync('data/elements.json', 'utf8')).items; // ручные экземпляры каталога
 const OUT = 'public/map.json';
 
 // Границы игровой зоны (то же, что в запросе Overpass) и запас вокруг под «задник».
@@ -59,11 +61,16 @@ const FOOT = new Set(['footway', 'pedestrian', 'path', 'steps', 'cycleway']);
 const PARK_HW = new Set(['secondary', 'tertiary', 'unclassified', 'residential', 'living_street']);
 
 const roads = [];
+const passageLines = []; // дороги сквозь дома (tunnel=building_passage) — для арок, см. elements.mjs
 const driveNodeIds = new Set();
 for (const w of ways.values()) {
   const t = tagsOf(w);
   const hw = t.highway;
   if (!hw || t.area === 'yes') continue;
+  if (t.tunnel === 'building_passage' && (DRIVE[hw] || FOOT.has(hw))) {
+    const w2 = Number.parseFloat(t.width), h2 = Number.parseFloat(t.maxheight);
+    passageLines.push({ p: wayPts(w), kind: DRIVE[hw] ? 'drive' : 'foot', ...(w2 > 1 && { w: w2 }), ...(h2 > 1 && { h: h2 }) });
+  }
   if (t.tunnel || t.indoor === 'yes' || hw === 'corridor' || Number(t.layer) < 0) continue;
   const drive = DRIVE[hw];
   if (!drive && !FOOT.has(hw)) continue;
@@ -245,6 +252,9 @@ const pois = [];
 const metro = [];
 const stops = [];
 const giveway = [];
+const monuments = []; // памятники и фонтаны: { kind: 'statue' | 'fountain', p, r?, name }
+const barriers = []; // заборы, стены, живые изгороди: { kind, p: [[x, z]…], h? }
+const furniture = []; // скамейки и урны: { kind: 'bench' | 'bin', p }
 
 const POI_SKIP = new Set([
   'bench', 'waste_basket', 'waste_disposal', 'parking', 'bicycle_parking', 'vending_machine', 'atm',
@@ -275,6 +285,10 @@ for (const n of nodes.values()) {
   if (t.highway === 'street_lamp') lamps.push(n.p);
   if (onDrive && t.highway === 'give_way') giveway.push(n.id);
   if (t.highway === 'bus_stop') stops.push({ p: n.p, name: t.name ?? null });
+  if (t.amenity === 'bench') furniture.push({ kind: 'bench', p: n.p });
+  if (t.amenity === 'waste_basket') furniture.push({ kind: 'bin', p: n.p });
+  if (t.memorial === 'statue') monuments.push({ kind: 'statue', p: n.p, name: t.name ?? null });
+  if (t.amenity === 'fountain') monuments.push({ kind: 'fountain', p: n.p, r: 1.5, name: t.name ?? null });
   if (t.railway === 'subway_entrance') metro.push({ p: n.p, name: t.name ?? 'Метро', colour: t.colour ?? null, ref: t.ref ?? null });
   const cat = t.name && poiCategory(t);
   if (cat) pois.push({ p: n.p, name: t.name, cat });
@@ -290,6 +304,22 @@ for (const w of ways.values()) {
       for (let d = 0; d < len; d += 8) trees.push([round2(x1 + ((x2 - x1) * d) / len), round2(z1 + ((z2 - z1) * d) / len)]);
     }
   }
+  if (['fence', 'wall', 'hedge'].includes(t.barrier)) {
+    const pts = wayPts(w);
+    // Вид забора: из тегов OSM или из правки (data/overrides.json, ключ way/id, поле fence_type).
+    const type = OVERRIDES[`way/${w.id}`]?.fence_type ?? t.fence_type ?? t.material;
+    const kind = t.barrier !== 'fence' ? t.barrier : type === 'concrete' ? 'concrete' : type === 'chain_link' ? 'chain' : type === 'arcade' ? 'arcade' : 'fence';
+    if (pts.length > 1 && pts.some(inExt)) barriers.push({ kind, p: pts, h: Number.parseFloat(t.height) || undefined });
+  }
+  if (t.amenity === 'bench') {
+    const pts = wayPts(w);
+    if (pts.length) furniture.push({ kind: 'bench', p: centroid(pts) });
+  }
+  if (t.amenity === 'fountain' && w.nodes[0] === w.nodes[w.nodes.length - 1]) {
+    const pts = wayPts(w), c = centroid(pts);
+    const r = Math.max(...pts.map((q) => Math.hypot(q[0] - c[0], q[1] - c[1])));
+    if (inExt(c)) monuments.push({ kind: 'fountain', p: c, r: round2(r), name: t.name ?? null });
+  }
   const cat = t.name && !t.building && poiCategory(t);
   if (cat && w.nodes[0] === w.nodes[w.nodes.length - 1]) {
     const c = centroid(wayPts(w));
@@ -298,13 +328,54 @@ for (const w of ways.values()) {
 }
 
 
+const outBuildings = buildings.map(({ id, kind, part, ...b }) => (part ? { ...b, pt: 1 } : b));
+// Ручные элементы (data/elements.json). Ризалит — свой прямой объём перед стеной (дом с фасадом civic),
+// пилястры и фронтон к нему строит src/elements.js.
+// Ворота и входы, которые в OSM стоят точкой прямо на контуре дома.
+const onBuilding = new Set();
+for (const w of ways.values()) {
+  const t = tagsOf(w);
+  if ((t.building && t.building !== 'no') || t['building:part']) for (const id of w.nodes) onBuilding.add(id);
+}
+const gatePts = [], doorPts = [];
+for (const n of nodes.values()) {
+  if (!n.tags || !onBuilding.has(n.id) || !inExt(n.p)) continue;
+  if (n.tags.barrier === 'gate') gatePts.push({ p: n.p });
+  else if (n.tags.entrance && n.tags.entrance !== 'exit') doorPts.push({ p: n.p, kind: n.tags.entrance });
+}
+const elements = [];
+for (const { note, ...el } of ELEMENTS) {
+  if (el.type === 'risalit') {
+    outBuildings.push({ o: clean(risalitRing(el), true), i: [], h: el.h, mh: 0, name: null, facade: 'civic', color: el.color });
+    elements.push({ ...el, b: outBuildings.length - 1 });
+  } else elements.push(el);
+}
+// Арки: дороги сквозь дома (OSM) + ворота на стенах + сквозные во двор + входы во дворы без арок.
+function mapPassages() {
+  const ps = findPassages(outBuildings, passageLines);
+  for (const g of attachToWalls(outBuildings, gatePts)) {
+    const half = PASSAGE.drive.w / 2 + 0.3;
+    if (g.L < 2 * half || ps.some((q) => q.b === g.b && q.r === g.r && q.e === g.e && Math.abs(q.u - g.u) < 4)) continue;
+    ps.push({ b: g.b, r: g.r, e: g.e, u: Math.min(g.L - half, Math.max(half, g.u)), ...PASSAGE.drive, gate: 1 });
+  }
+  const streets = roads.filter((r) => r.kind !== 'foot').flatMap((r) => r.p.slice(1).map((q, k) => [...r.p[k], ...q]));
+  return throughPassages(outBuildings, ps, streets);
+}
+const passages = mapPassages();
+// Двери: не там, где уже арка.
+const doors = attachToWalls(outBuildings, doorPts)
+  .filter((d) => !passages.some((q) => q.b === d.b && q.r === d.r && q.e === d.e && Math.abs(q.u - d.u) < q.w / 2 + 1))
+  .map(({ L, ...d }) => d);
 const out = {
   attribution: '© участники OpenStreetMap, ODbL',
   origin: { lat: 59.9357, lon: 30.3275 },
   play,
   ext,
   roads,
-  buildings: buildings.map(({ id, kind, part, ...b }) => (part ? { ...b, pt: 1 } : b)),
+  buildings: outBuildings,
+  passages,
+  doors,
+  elements,
   water,
   snowAreas,
   signals,
@@ -314,6 +385,9 @@ const out = {
   pois,
   metro,
   stops,
+  monuments,
+  barriers,
+  furniture,
   giveway,
 };
 writeFileSync(OUT, JSON.stringify(out));

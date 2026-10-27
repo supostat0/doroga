@@ -14,6 +14,12 @@ import { Traffic } from './traffic.js';
 import { Pedestrians } from './peds.js';
 import { buildSigns } from './signs.js';
 import { buildProps, FLICKER } from './props.js';
+import { buildDetails } from './details.js';
+import { buildPassages } from './passages.js';
+import { buildDoors } from './doors.js';
+import { buildElements } from './elements.js';
+import { Walker } from './walker.js';
+import { Beams } from './beams.js';
 import { buildLightMap } from './lights.js';
 import { LIGHT_UNIFORMS } from './shaders.js';
 import { makePost } from './post.js';
@@ -52,9 +58,12 @@ const ground = buildGround(map, scene);
 const photoFacades = await loadFacadeList(); // фасады по разметке фото (tools/facade.html)
 const city = buildBuildings(map, scene, photoFacades);
 addPhotoFacades(scene, photoFacades);
+const passageWalls = buildPassages(map, scene); // арки-проезды: свод за вырезом в стене
+buildDoors(map, scene); // двери из OSM
 
 const walls = new SegmentGrid();
 city.colliders.forEach((s) => walls.add(s));
+passageWalls.forEach((s) => walls.add(s));
 ground.embankment.forEach((s) => walls.add(s));
 ground.bridgeEdges.forEach((s) => walls.add(s));
 const street = buildStreet(map, ground, scene); // бордюры, сугробы, припаркованные машины, фонари
@@ -67,6 +76,8 @@ for (const c of street.parked) {
   for (let i = 0; i < 4; i++) walls.add([...P[i], ...P[(i + 1) % 4]]);
 }
 buildProps(map, ground, scene);
+buildDetails(map, scene).forEach((s) => walls.add(s)); // препятствия — заборы, стены, изгороди
+buildElements(map, scene).forEach((s) => walls.add(s)); // ручные элементы каталога (data/elements.json)
 const signs = buildSigns(map, city.facades, scene);
 const metro = buildMetro(map, city.facades, scene);
 const stops = buildStops(map, scene);
@@ -75,6 +86,7 @@ buildLightMap(map, city.facades, signs, [...metro, ...stops]);
 const graph = buildRoadGraph(map, new Set(map.signals.map((s) => s.id)));
 const signals = new Signals(map, graph, scene, ground.roadAt);
 const traffic = new Traffic(graph, signals, scene);
+const beams = new Beams(scene); // свет фар NPC на дороге
 buildTrolleyWires(graph, scene);
 const roadSigns = buildRoadSigns(map, graph, ground.roadAt, scene);
 const couriers = new Couriers(graph, signals, scene);
@@ -140,10 +152,29 @@ const tracks = new Tracks(scene, ground.roadAt);
   const disc = new THREE.CircleGeometry(0.4, 12).rotateX(-Math.PI / 2);
   addChunked(scene, disc, new THREE.MeshLambertMaterial({ map: tex, transparent: true, alphaTest: 0.5, polygonOffset: true, polygonOffsetFactor: -2 }), manholes);
 }
-const hud = new Hud(map, ground.maskCanvas);
+const hud = new Hud(map, ground.maskCanvas, photoFacades);
 
 // --- ввод ---
 const input = { up: false, down: false, left: false, right: false, brake: false };
+const fly = { rise: false, sink: false, fast: false }; // свободный полёт (F)
+const parked = { up: false, down: false, left: false, right: false, brake: true }; // машина стоит, пока летаем
+let touchFly = false;
+let walker = null; // пешком (F): человечок вместо машины
+const toggleWalk = () => {
+  if (chase.fly) return;
+  walker ??= new Walker(scene);
+  if (!walking) { walker.exit(player, walls); walking = true; chase.reset(); return; }
+  if (walker.near(player)) { walker.hide(); walking = false; chase.reset(); return; }
+  toast('Подойдите к машине, чтобы сесть');
+};
+let walking = false;
+const toast = (text) => {
+  const el = document.getElementById('toast');
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => (el.hidden = true), 2000);
+};
 const KEYS = {
   KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down',
   KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', Space: 'brake',
@@ -153,6 +184,10 @@ addEventListener('keydown', (e) => {
     input[KEYS[e.code]] = true;
     e.preventDefault();
   }
+  if (e.code === 'KeyG') chase.toggleFly();
+  if (e.code === 'KeyF') toggleWalk();
+  if (e.code === 'KeyE' || e.code === 'KeyQ' || e.code.startsWith('Shift')) fly[e.code[0] === 'S' ? 'fast' : e.code === 'KeyE' ? 'rise' : 'sink'] = true;
+  if (chase.fly || walking) return; // в полёте и пешком клавиши не для машины
   if (e.code === 'KeyC') chase.nextMode();
   if (e.code === 'KeyR') player.reset(nearestSpawn(map, player));
   if (e.code === 'KeyM') hud.toggleMap();
@@ -161,10 +196,25 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyE') player.blinker = player.blinker === 1 ? 0 : 1;
 });
 addEventListener('keyup', (e) => {
+  if (e.code === 'KeyE' || e.code === 'KeyQ' || e.code.startsWith('Shift')) fly[e.code[0] === 'S' ? 'fast' : e.code === 'KeyE' ? 'rise' : 'sink'] = false;
   if (e.code === 'KeyH') sound.horn(false);
   if (KEYS[e.code]) input[KEYS[e.code]] = false;
 });
 addEventListener('blur', () => Object.keys(input).forEach((k) => (input[k] = false)));
+// Кнопки на телефоне: держишь — едет, отпустил — нет.
+for (const b of document.querySelectorAll('#touch button')) {
+  const set = (v) => { if (b.dataset.key) input[b.dataset.key] = v; b.classList.toggle('on', v); };
+  b.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    b.setPointerCapture(e.pointerId);
+    if (b.dataset.act === 'reset') player.reset(nearestSpawn(map, player));
+    if (b.dataset.act === 'fly') { chase.toggleFly(); touchFly = true; }
+    if (b.dataset.act === 'walk') toggleWalk();
+    set(true);
+  });
+  for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) b.addEventListener(ev, () => set(false));
+  b.addEventListener('contextmenu', (e) => e.preventDefault());
+}
 
 // --- старт ---
 const startBtn = document.getElementById('start');
@@ -178,6 +228,7 @@ startBtn.addEventListener('click', () => {
   sound.start();
   document.getElementById('intro').classList.add('gone');
   document.getElementById('hud').hidden = false;
+  document.getElementById('touch').hidden = false;
   running = true;
 });
 if (new URLSearchParams(location.search).has('autostart')) startBtn.click();
@@ -206,6 +257,7 @@ renderer.setAnimationLoop(() => {
   // Пешеходы, которые сейчас на проезжей части (переходят) — их NPC пропускают. Обычно их единицы.
   traffic.walkersOnRoad = peds.peds.filter((q) => ground.roadAt(q.x, q.z) > 0.5);
   traffic.update(dt, player);
+  beams.update(traffic.cars, camera.position);
   for (const h of traffic.honks.splice(0)) {
     const d = Math.hypot(h.x - player.x, h.z - player.z);
     if (d < 60) sound.npcHorn(1 - d / 60, h.aggr);
@@ -223,17 +275,19 @@ renderer.setAnimationLoop(() => {
     }
   }
   if (running) {
-    player.update(dt, input, world);
+    player.update(dt, chase.fly || walking ? parked : input, world);
+    if (walking && !chase.fly) walker.update(dt, input, fly.fast, walls);
     tracks.update(dt, t, [player, ...traffic.cars.filter((c) => Math.abs(c.x - camera.position.x) < 70 && Math.abs(c.z - camera.position.z) < 70)]);
     orders.update(dt, t, player);
     if (signals.checkRunRed(player)) hud.redLight();
   } else player.sync(dt, 0);
-  chase.update(dt, player);
+  if (chase.fly) chase.updateFly(dt, { ...input, ...fly }, touchFly);
+  else chase.update(dt, walking ? walker : player);
   cullFar(camera);
   ground.follow(camera.position);
   snow.update(t, camera, renderer.getPixelRatio());
   vapor.update(dt, [player, ...traffic.cars.filter((c) => !c.trolley && Math.abs(c.x - camera.position.x) < 90 && Math.abs(c.z - camera.position.z) < 90)], renderer.getPixelRatio(), camera.position);
-  hud.update(dt, player);
+  hud.update(dt, walking ? walker : player);
   const tr = traffic.cars.filter((c) => c.trolley);
   sound.update(player, Math.min(...tr.map((c) => Math.hypot(c.x - player.x, c.z - player.z))));
   const cpuMs = performance.now() - t0;
@@ -310,4 +364,4 @@ function skyGradient() {
 }
 
 // Для отладки из консоли: ?debug
-if (new URLSearchParams(location.search).has('debug')) window.__game = { scene, camera, player, traffic, signals, graph, map, chase, peds, ground, signs, composer, perf, couriers, street, vapor, roadSigns, orders };
+if (new URLSearchParams(location.search).has('debug')) window.__game = { scene, camera, player, beams, traffic, signals, graph, map, chase, peds, ground, signs, composer, perf, couriers, street, vapor, roadSigns, orders };

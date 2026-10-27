@@ -60,13 +60,15 @@ export class SegmentGrid {
     return hit;
   }
 
-  // Доля пути a->b до первого препятствия (1 — свободно).
+  // Доля пути a->b до первого препятствия (1 — свободно). Низкие (5-й элемент — 1: заборы,
+  // изгороди) не считаются — камера смотрит поверх них.
   raycast(ax, az, bx, bz) {
     let best = 1;
     const mx = (ax + bx) / 2, mz = (az + bz) / 2;
     const r = Math.hypot(bx - ax, bz - az) / 2 + 1;
     for (const i of this.near(mx, mz, r, this._tmp2 || (this._tmp2 = new Set()))) {
-      const [cx, cz, dx, dz] = this.segs[i];
+      const [cx, cz, dx, dz, low] = this.segs[i];
+      if (low) continue;
       const t = segIntersect(ax, az, bx, bz, cx, cz, dx, dz);
       if (t !== null && t < best) best = t;
     }

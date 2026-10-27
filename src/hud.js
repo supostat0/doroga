@@ -1,10 +1,12 @@
-// Спидометр, название улицы, мини-карта.
+// Спидометр, название улицы, мини-карта, автор фото рядом стоящего фасада.
 
 import { distToPolyline } from './geom.js';
 
 export class Hud {
-  constructor(map, maskCanvas) {
+  constructor(map, maskCanvas, facades = []) {
     this.map = map;
+    this.facades = facades.filter((f) => f.credit);
+    this.creditEl = document.getElementById('credit');
     this.speedEl = document.getElementById('speed');
     this.streetEl = document.getElementById('street');
     this.redEl = document.getElementById('redlights');
@@ -42,6 +44,8 @@ export class Hud {
       }
     }
     if (best !== null || bd >= 14) this.streetEl.textContent = best ?? '';
+    const near = this.facades.find((f) => Math.hypot(f.mid[0] - car.x, f.mid[1] - car.z) < 45);
+    this.creditEl.textContent = near ? `Фасад по фото: ${near.credit}` : '';
     this.drawMini(car);
   }
 

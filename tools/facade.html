@@ -40,6 +40,11 @@
   .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
   .swatch { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -2px; border: 1px solid #fff4; }
   #modeHint { color: var(--mute); font-size: 13px; margin: 0 0 8px; }
+  #catalog { flex-basis: 100%; color: var(--mute); font-size: 13px; }
+  .layers { color: var(--mute); font-size: 13px; margin: 0 0 6px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .legend { font-size: 12px; }
+  #catalog ul { margin: 6px 0 0; padding-left: 18px; columns: 2; }
+  #catalog .plan { opacity: .6; }
 </style>
 </head>
 <body>
@@ -54,10 +59,23 @@
     <option value="своё фото">Своё фото</option>
   </select>
   <button id="send" disabled>Сохранить в игру</button>
+  <button class="ghost" id="auto" title="Пройти по всем уличным стенам и найти перед каждой панорамы Mapillary">Собрать фото по улицам</button>
+  <button class="ghost" id="next" title="Следующая стена с найденными фото (зелёные на карте)">Следующая</button>
+  <span id="autoHint"></span>
   <span id="hint">1) стена на карте · 2) фото и углы · 3) разметка: этажи, окно, низ</span>
+  <details id="catalog"><summary>Каталог элементов</summary><ul></ul></details>
 </header>
 <main>
-  <div class="pane"><h2 id="wall">Карта: колесо — масштаб, тянуть — двигать, клик по стене дома — выбрать. Оранжевые стены уже размечены.</h2><canvas id="map"></canvas></div>
+  <div class="pane"><h2 id="wall">Карта: колесо — масштаб, тянуть — двигать, клик по стене дома — выбрать. Оранжевые стены уже размечены.</h2>
+    <div class="layers" id="layers">Слои:
+      <label><input type="checkbox" data-l="sat"> спутник</label>
+      <label><input type="checkbox" data-l="arch"> арки и ворота</label>
+      <label><input type="checkbox" data-l="door"> двери</label>
+      <label><input type="checkbox" data-l="fence"> заборы</label>
+      <label><input type="checkbox" data-l="elem"> элементы</label>
+      <label><input type="checkbox" data-l="tree"> деревья, фонари</label>
+    </div>
+    <canvas id="map"></canvas></div>
   <div id="right">
     <div class="pane"><h2>1. Фото: углы фасада — 1 левый верх, 2 правый верх, 3 правый низ, 4 левый низ. Можно несколько снимков одного фасада.</h2><p id="mlyHint"></p><div id="mly" class="strip"></div><div id="thumbs" class="strip"></div><p id="count"></p><canvas id="src"></canvas></div>
     <div class="pane">
@@ -84,6 +102,7 @@
 import { homography, kmeans, wallSpan, wallChain, combine, findRepeats, fillGrid, viewCamera, dirToPano } from './facade-math.mjs';
 import { project, unproject } from './geo.mjs';
 import { drawFacade, facadeSections, PX_PER_M as P } from '../src/facadegen.js';
+import { CATALOG } from '../src/catalog.js';
 
 const $ = (id) => document.getElementById(id);
 const hex = (c) => '#' + c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
@@ -91,6 +110,7 @@ const hex = (c) => '#' + c.map((v) => Math.round(v).toString(16).padStart(2, '0'
 // ---------- Карта ----------
 const map = await (await fetch('/map.json')).json();
 let done = await fetch('/facades/index.json').then((r) => (r.ok ? r.json() : [])).catch(() => []);
+let queue = await fetch('/__facade/shots').then((r) => (r.ok ? r.json() : [])).catch(() => []); // очередь авторежима
 const mc = $('map'), mctx = mc.getContext('2d');
 const view = { cx: 40, cz: 0, s: 1.5 }; // центр в метрах, пикселей на метр; старт — у Казанского моста
 let sel = null, hover = null; // { bi, s, e } — дом и вершины концов стены
@@ -115,11 +135,78 @@ function seg(a, b, color, width) {
   mctx.beginPath(); mctx.moveTo(ax, ay); mctx.lineTo(bx, by); mctx.stroke();
 }
 
+// ---------- Слои карты ----------
+// Спутник (Esri World Imagery — только для сверки в инструменте, в игру не идёт) и то, что игра
+// нашла и построила: арки, ворота, двери, заборы, элементы — чтобы сверять с реальностью.
+const urlq = new URLSearchParams(location.search);
+const layers = new Set((urlq.get('layers') ?? '').split(',').filter(Boolean));
+if (urlq.get('view')) { const [x, z, s] = urlq.get('view').split(',').map(Number); Object.assign(view, { cx: x, cz: z, s: s || view.s }); }
+for (const el of document.querySelectorAll('#layers input')) {
+  el.checked = layers.has(el.dataset.l);
+  el.onchange = () => { el.checked ? layers.add(el.dataset.l) : layers.delete(el.dataset.l); drawMap(); };
+}
+const tiles = new Map();
+let tileRedraw = 0;
+function drawSatellite() {
+  const lat0 = unproject(view.cx, view.cz)[0];
+  const z = Math.max(12, Math.min(19, Math.round(Math.log2(156543.03 * Math.cos((lat0 * Math.PI) / 180) * view.s * devicePixelRatio))));
+  const n = 2 ** z;
+  const tx = (lon) => ((lon + 180) / 360) * n;
+  const ty = (lat) => ((1 - Math.log(Math.tan((lat * Math.PI) / 180) + 1 / Math.cos((lat * Math.PI) / 180)) / Math.PI) / 2) * n;
+  const lonOf = (x) => (x / n) * 360 - 180;
+  const latOf = (y) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n))) * 180) / Math.PI;
+  const [la0, lo0] = unproject(...toWorld(0, 0)), [la1, lo1] = unproject(...toWorld(mc.width, mc.height));
+  for (let x = Math.floor(tx(lo0)); x <= Math.floor(tx(lo1)); x++) {
+    for (let y = Math.floor(ty(la0)); y <= Math.floor(ty(la1)); y++) {
+      const url = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+      let im = tiles.get(url);
+      if (!im) {
+        im = new Image();
+        im.onload = () => { cancelAnimationFrame(tileRedraw); tileRedraw = requestAnimationFrame(drawMap); };
+        im.src = url;
+        tiles.set(url, im);
+      }
+      if (!im.complete || !im.naturalWidth) continue;
+      const [sx0, sy0] = toScreen(...project(latOf(y), lonOf(x))), [sx1, sy1] = toScreen(...project(latOf(y + 1), lonOf(x + 1)));
+      mctx.drawImage(im, sx0, sy0, sx1 - sx0, sy1 - sy0);
+    }
+  }
+  mctx.fillStyle = '#fff9'; mctx.font = `${11 * devicePixelRatio}px system-ui`;
+  mctx.fillText('Спутник: Esri, Maxar, Earthstar Geographics', 8 * devicePixelRatio, mc.height - 8 * devicePixelRatio);
+}
+// Точка на стене дома: «дом, кольцо, ребро, u» → [x, z] и нормаль наружу.
+function onWall({ b, r, e, u }) {
+  const bd = map.buildings[b], ring = [bd.o, ...bd.i][r], a = ring[e], c = ring[(e + 1) % ring.length];
+  const L = Math.hypot(c[0] - a[0], c[1] - a[1]);
+  return { p: [a[0] + ((c[0] - a[0]) * u) / L, a[1] + ((c[1] - a[1]) * u) / L], n: [(c[1] - a[1]) / L, -(c[0] - a[0]) / L], t: [(c[0] - a[0]) / L, (c[1] - a[1]) / L] };
+}
+function dot([x, z], color, r = 3) {
+  const [sx, sy] = toScreen(x, z);
+  mctx.fillStyle = color; mctx.beginPath(); mctx.arc(sx, sy, r * devicePixelRatio, 0, 7); mctx.fill();
+}
+function drawLayers() {
+  if (layers.has('fence')) {
+    const col = { fence: '#c9c9d6', concrete: '#9aa0a6', chain: '#7f8c8d', arcade: '#ffd36b', wall: '#d9a679', hedge: '#6fcf8f' };
+    for (const br of map.barriers ?? []) for (let k = 1; k < br.p.length; k++) seg(br.p[k - 1], br.p[k], col[br.kind] ?? '#fff', 2);
+  }
+  if (layers.has('arch')) {
+    for (const q of map.passages ?? []) {
+      const { p, t } = onWall(q);
+      const color = q.gate ? '#4fd1ff' : q.auto ? '#ff9f43' : q.vault === 0 ? '#c56cf0' : q.open ? '#ff5e7e' : '#ff3b3b';
+      seg([p[0] - (t[0] * q.w) / 2, p[1] - (t[1] * q.w) / 2], [p[0] + (t[0] * q.w) / 2, p[1] + (t[1] * q.w) / 2], color, 4);
+    }
+  }
+  if (layers.has('door')) for (const d of map.doors ?? []) dot(onWall(d).p, d.kind === 'shop' ? '#ff9ff3' : '#ffe066', 2.5);
+  if (layers.has('elem')) for (const el of map.elements ?? []) dot(el.at ?? [0, 0], '#00e5ff', 6);
+  if (layers.has('tree')) { for (const t of map.trees ?? []) dot(t, '#2ecc71', 1.5); for (const l of map.lamps ?? []) dot(l, '#ffd166', 1.5); }
+}
+
 function drawMap() {
   mctx.fillStyle = '#0d0c12'; mctx.fillRect(0, 0, mc.width, mc.height);
+  if (layers.has('sat')) drawSatellite();
   mctx.fillStyle = '#1d2a3d';
-  for (const w of map.water) { poly(w.o); mctx.fill(); }
-  mctx.strokeStyle = '#3a3746'; mctx.lineCap = 'round';
+  if (!layers.has('sat')) for (const w of map.water) { poly(w.o); mctx.fill(); }
+  mctx.strokeStyle = layers.has('sat') ? '#ffffff30' : '#3a3746'; mctx.lineCap = 'round';
   for (const r of map.roads) {
     mctx.lineWidth = Math.max(1, (r.w || 3) * view.s * devicePixelRatio * (r.kind === 'drive' ? 1 : 0.5));
     mctx.beginPath();
@@ -129,9 +216,12 @@ function drawMap() {
   mctx.lineWidth = devicePixelRatio;
   for (const b of map.buildings) {
     poly(b.o);
-    mctx.fillStyle = b.mh > 0 ? '#3b3648' : '#575166'; mctx.fill();
-    mctx.strokeStyle = '#8a8499'; mctx.stroke();
+    if (!layers.has('sat')) { mctx.fillStyle = b.mh > 0 ? '#3b3648' : '#575166'; mctx.fill(); }
+    mctx.strokeStyle = layers.has('sat') ? '#7cf0ffcc' : '#8a8499'; mctx.stroke();
+    for (const h of b.i) { poly(h); mctx.stroke(); }
   }
+  drawLayers();
+  for (const q of queue) if (!isDone(q.mid)) { const w = span(q); seg(w.a, w.b, '#7be08a', 3); }
   for (const f of done) if (f.params) seg(f.a, f.b, '#ffb454', 4);
   if (hover && !same(hover, sel)) { const w = span(hover); seg(w.a, w.b, '#ffffff88', 4); }
   if (sel) {
@@ -191,7 +281,7 @@ mc.onwheel = (e) => {
 };
 addEventListener('resize', () => { resize(); redraw(); });
 
-function selectWall(s) {
+async function selectWall(s) {
   sel = s;
   const b = map.buildings[s.bi], w = span(s);
   wallH = b.h - (b.mh || 0);
@@ -202,6 +292,12 @@ function selectWall(s) {
   const old = done.find((f) => f.params && Math.hypot(f.mid[0] - w.mid[0], f.mid[1] - w.mid[1]) < 0.5);
   if (old) { params = structuredClone(old.params); userColors = true; }
   drawMap(); rectify(); findShots();
+  // Стена из очереди авторежима — сразу её снимки (у панорам углы ставятся сами).
+  const q = queue.find((x) => same(x, s));
+  if (q) {
+    photos = []; cur = -1;
+    for (const m of q.shots) await addShot(m, { style: {} });
+  }
 }
 
 // ---------- Фото ----------
@@ -234,18 +330,18 @@ async function load(file) {
 const CAM_H = 2.5; // высота камеры над землёй (на крыше машины / в руке), м
 let shotsFor = null;
 
-async function findShots() {
-  const w = span(sel), key = `${sel.bi}:${sel.s}:${sel.e}`;
-  shotsFor = key;
+// Все снимки Mapillary в рамке вокруг стены (null — Mapillary недоступен).
+function nearShots(w) {
   const pad = 45, xs = [w.a[0], w.b[0]], zs = [w.a[1], w.b[1]];
   const [la0, lo0] = unproject(Math.min(...xs) - pad, Math.max(...zs) + pad);
   const [la1, lo1] = unproject(Math.max(...xs) + pad, Math.min(...zs) - pad);
-  $('mly').innerHTML = ''; $('mlyHint').textContent = 'Ищу снимки Mapillary перед этой стеной…';
-  const list = await fetch(`/__mly/near?bbox=${lo0},${la0},${lo1},${la1}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-  if (shotsFor !== key) return; // пока искали, выбрали другую стену
-  if (!list) { $('mlyHint').textContent = 'Mapillary недоступен (нужен дев-сервер и ключ в .mapillary-token).'; return; }
+  return fetch(`/__mly/near?bbox=${lo0},${la0},${lo1},${la1}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+}
+
+// Снимки, на которых видна стена: камера снаружи в 3–45 м, вдоль ±25 м; перспективные — смотрят на стену.
+function rankShots(w, list) {
   const t = [(w.b[0] - w.a[0]) / w.len, (w.b[1] - w.a[1]) / w.len];
-  const shots = list.map((m) => {
+  return list.map((m) => {
     const g = (m.computed_geometry || m.geometry).coordinates;
     const C = project(g[1], g[0]);
     const rx = C[0] - w.mid[0], rz = C[1] - w.mid[1];
@@ -256,6 +352,16 @@ async function findShots() {
   }).filter((m) => m.d > 3 && m.d < 45 && Math.abs(m.along) < w.len / 2 + 25 && (m.is_pano || Math.abs(m.off) < 50))
     .sort((p, q) => q.is_pano - p.is_pano || q.captured_at - p.captured_at)
     .slice(0, 16);
+}
+
+async function findShots() {
+  const w = span(sel), key = `${sel.bi}:${sel.s}:${sel.e}`;
+  shotsFor = key;
+  $('mly').innerHTML = ''; $('mlyHint').textContent = 'Ищу снимки Mapillary перед этой стеной…';
+  const list = await nearShots(w);
+  if (shotsFor !== key) return; // пока искали, выбрали другую стену
+  if (!list) { $('mlyHint').textContent = 'Mapillary недоступен (нужен дев-сервер и ключ в .mapillary-token).'; return; }
+  const shots = rankShots(w, list);
   $('mlyHint').textContent = shots.length
     ? `Снимки Mapillary перед стеной (${shots.length}): клик — добавить. У панорам (360°) углы ставятся сами.`
     : 'Перед этой стеной снимков Mapillary нет — загрузите фото вручную.';
@@ -609,6 +715,81 @@ $('send').onclick = async () => {
   $('hint').textContent = `✓ Сохранено в игру. Размечено стен: ${res.total}. Стена на карте стала оранжевой.`;
   drawMap();
 };
+
+// ---------- Авторежим: фото для всех уличных стен ----------
+function isDone(mid) {
+  return done.some((f) => f.params && Math.hypot(f.mid[0] - mid[0], f.mid[1] - mid[1]) < 0.5);
+}
+const drive = map.roads.filter((r) => r.kind === 'drive' || r.kind === 'service');
+const distTo = (p, pts) => {
+  let d = Infinity;
+  for (let i = 1; i < pts.length; i++) {
+    const [ax, az] = pts[i - 1], [bx, bz] = pts[i], dx = bx - ax, dz = bz - az;
+    const t = Math.max(0, Math.min(1, ((p[0] - ax) * dx + (p[1] - az) * dz) / (dx * dx + dz * dz || 1)));
+    d = Math.min(d, Math.hypot(p[0] - ax - dx * t, p[1] - az - dz * t));
+  }
+  return d;
+};
+
+// Прямые стены от 8 м у домов от 8 м высотой, перед которыми (в 8 м снаружи) проезд.
+function streetWalls() {
+  const out = [], seen = new Set();
+  map.buildings.forEach((b, bi) => {
+    if ((b.mh || 0) > 2 || b.h - (b.mh || 0) < 8) return;
+    for (let ei = 0; ei < b.o.length; ei++) {
+      const c = { bi, ...wallChain(b.o, ei) }, key = `${bi}:${c.s}:${c.e}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const w = span(c);
+      if (w.len < 8) continue;
+      const front = [w.mid[0] + w.n[0] * 8, w.mid[1] + w.n[1] * 8];
+      if (drive.some((r) => distTo(front, r.p) < 14)) out.push({ ...c, mid: w.mid });
+    }
+  });
+  return out;
+}
+
+$('auto').onclick = async () => {
+  $('auto').disabled = true;
+  const todo = streetWalls().filter((c) => !isDone(c.mid) && !queue.some((q) => same(q, c)));
+  let k = 0, found = 0;
+  const work = async () => {
+    while (k < todo.length) {
+      const c = todo[k++], w = span(c);
+      const list = await nearShots(w);
+      if (!list) { $('autoHint').textContent = 'Mapillary недоступен (нужен дев-сервер и ключ).'; k = todo.length; return; }
+      // Только панорамы: у них углы рамки ставятся сами. Ближе к середине стены — лучше.
+      const shots = rankShots(w, list).filter((m) => m.is_pano).sort((p, q) => Math.abs(p.along) + p.d / 3 - Math.abs(q.along) - q.d / 3).slice(0, 3)
+        .map(({ id, is_pano, C, heading, captured_at, creator }) => ({ id, is_pano, C, heading, captured_at, creator: creator && { username: creator.username } }));
+      if (shots.length) { queue.push({ bi: c.bi, s: c.s, e: c.e, mid: c.mid, shots }); found++; }
+      $('autoHint').textContent = `Стен проверено ${k} из ${todo.length}, с фото — ${found}`;
+      if (k % 20 === 0) { await saveQueue(); drawMap(); }
+    }
+  };
+  await Promise.all([work(), work(), work(), work()]);
+  await saveQueue(); drawMap();
+  $('autoHint').textContent = `Готово: с фото ${queue.filter((q) => !isDone(q.mid)).length} стен (зелёные). «Следующая» — открыть по очереди.`;
+  $('auto').disabled = false;
+};
+const saveQueue = () => fetch('/__facade/shots', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(queue) });
+
+$('next').onclick = () => {
+  const q = queue.find((x) => !isDone(x.mid) && !same(x, sel));
+  if (!q) { $('autoHint').textContent = 'В очереди пусто — нажмите «Собрать фото по улицам».'; return; }
+  view.cx = q.mid[0]; view.cz = q.mid[1];
+  selectWall({ bi: q.bi, s: q.s, e: q.e });
+};
+if (queue.length) $('autoHint').textContent = `В очереди с фото: ${queue.filter((q) => !isDone(q.mid)).length} стен (зелёные).`;
+
+// Каталог: что игра умеет строить (src/catalog.js) и сколько этого на карте.
+{
+  const has = CATALOG.filter((e) => e.status === 'есть').length;
+  $('catalog').querySelector('summary').textContent = `Каталог элементов: умеем ${has}, в очереди ${CATALOG.length - has}`;
+  $('catalog').querySelector('ul').innerHTML = CATALOG.map((e) => {
+    const n = e.count ? e.count(map) : null;
+    return `<li class="${e.status === 'есть' ? '' : 'plan'}" title="${e.find}">${e.title}${n != null ? ` — ${n}` : ''}${e.status === 'есть' ? '' : ' (план)'}</li>`;
+  }).join('');
+}
 
 // Источник фото запоминается между заходами.
 try { const v = localStorage.getItem('facadeSource'); if (v) $('source').value = v; } catch {}
